@@ -18,18 +18,43 @@
           # legitimately coexist here — the types never cross the public
           # boundary — so allow the otherwise-fatal inconsistent dependency, as
           # the toolchain already does for grapesy itself.
-          package = pkgs.haskell.lib.justStaticExecutables
-            (pkgs.haskell.lib.allowInconsistentDependencies
-              (toolchain.hp.callCabal2nix "rechaos" ./. {}));
+          # The library/exe/test derivation, before justStaticExecutables
+          # strips docs. Reused for the shipped executable and for the
+          # haddock-enabled doc derivation below.
+          rawPackage = pkgs.haskell.lib.allowInconsistentDependencies
+            (toolchain.hp.callCabal2nix "rechaos" ./. {});
+          package = pkgs.haskell.lib.justStaticExecutables rawPackage;
+          # Same package with Haddock generation forced on. Building this
+          # derivation fails on any haddock error, which is exactly the
+          # documentation-rot gate we want. The rendered HTML lives in the
+          # "doc" output.
+          docsPackage = pkgs.haskell.lib.doHaddock
+            (pkgs.haskell.lib.dontCheck rawPackage);
           # Sources fourmolu/hlint check over, kept in sync with the cabal
           # hand-written stanzas (the generated/ tree is deliberately excluded).
           haskellSrc = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [ ./app ./src ./test ./fourmolu.yaml ./.hlint.yaml ];
           };
-        in { inherit pkgs toolchain python package haskellSrc; };
+          # Source tree for `cabal check`: the cabal file plus everything it
+          # references via extra-source-files, so the check sees a faithful,
+          # hermetic copy of what an sdist would ship.
+          cabalSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./rechaos.cabal ./app ./src ./test ./generated
+              ./examples ./proto ./CHANGELOG.md ./README.md ./LICENSE
+            ];
+          };
+        in { inherit pkgs toolchain python package docsPackage haskellSrc cabalSrc; };
     in {
-      packages = eachSystem (system: { default = (build system).package; });
+      packages = eachSystem (system:
+        let b = build system;
+        in {
+          default = b.package;
+          # The rendered Haddock HTML as a browsable artifact.
+          docs = b.docsPackage.doc;
+        });
       checks = eachSystem (system:
         let b = build system;
         in {
@@ -51,6 +76,28 @@
           } ''
             cd ${b.haskellSrc}
             hlint -XImportQualifiedPost --hint=.hlint.yaml app src test
+            touch "$out"
+          '';
+          # Documentation gate: build Haddock for the whole package and fail on
+          # any haddock error, so doc-comment rot is caught in CI. The build of
+          # docsPackage does the work; this check just pins it into the set and
+          # surfaces the HTML path.
+          docs = b.pkgs.runCommand "rechaos-docs" {} ''
+            test -d ${b.docsPackage.doc}/share/doc
+            touch "$out"
+          '';
+          # Packaging/metadata gate: `cabal check` over the source tree, failing
+          # on any error-level finding (Hackage-metadata rot). Hermetic: runs
+          # against a read-only fileset copy, no network, no build.
+          cabalCheck = b.pkgs.runCommand "rechaos-cabal-check" {
+            nativeBuildInputs = [ b.pkgs.cabal-install ];
+          } ''
+            cp -r ${b.cabalSrc} ./src-tree
+            chmod -R u+w ./src-tree
+            cd ./src-tree
+            export HOME="$PWD/.home"
+            mkdir -p "$HOME"
+            cabal check
             touch "$out"
           '';
         });

@@ -26,11 +26,6 @@ valid ByteStream edits.
 module Rechaos.Shell.Wire (
   -- * Schema-free RPC type
   Wire,
-
-  -- * Named RPC aliases
-  ReadRPC,
-  WriteRPC,
-  MissingRPC,
 ) where
 
 import Data.ByteString.Char8 qualified as B
@@ -59,13 +54,3 @@ instance (KnownSymbol s, KnownSymbol m) => SupportsClientRpc (Wire s m) where
 instance (KnownSymbol s, KnownSymbol m) => SupportsServerRpc (Wire s m) where
   rpcDeserializeInput _ = Right
   rpcSerializeOutput _ = id
-
--- | The ByteStream @Read@ method.
-type ReadRPC = Wire "google.bytestream.ByteStream" "Read"
-
--- | The ByteStream @Write@ method.
-type WriteRPC = Wire "google.bytestream.ByteStream" "Write"
-
--- | The REAPI @FindMissingBlobs@ method.
-type MissingRPC =
-  Wire "build.bazel.remote.execution.v2.ContentAddressableStorage" "FindMissingBlobs"

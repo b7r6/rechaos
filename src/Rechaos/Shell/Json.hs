@@ -62,7 +62,7 @@ instance FromJSON Fault where
         onlyKeys ["kind", "bytesPerSecond", "chunkBytes"] o
         r <- o .: "bytesPerSecond"
         c <- o .: "chunkBytes"
-        when (r == 0 || c == 0 || c > 4194304) $
+        unless (validFaultBounds (Dribble r c)) $
           fail "dribble requires positive rate and chunkBytes in 1..4194304"
         pure (Dribble r c)
       "truncate" -> onlyKeys ["kind", "keepBytes"] o >> Truncate <$> o .: "keepBytes"
@@ -114,9 +114,10 @@ instance ToJSON Rule where
 instance FromJSON Rule where
   parseJSON = withObject "rule" $ \o -> do
     onlyKeys ["target", "chancePpm", "fault"] o
-    r <- Rule <$> o .: "target" <*> o .:? "chancePpm" .!= 1000000 <*> o .: "fault"
-    when (chancePpm r > 1000000) $ fail "chancePpm must be in 0..1000000"
-    pure r
+    t <- o .: "target"
+    c <- o .:? "chancePpm" .!= maxPpm
+    f <- o .: "fault"
+    maybe (fail "chancePpm must be in 0..1000000") pure (mkRule t c f)
 instance ToJSON Policy where
   toJSON p = object ["version" .= (1 :: Int), "seed" .= seed p, "rules" .= rules p]
 instance FromJSON Policy where

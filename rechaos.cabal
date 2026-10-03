@@ -29,10 +29,16 @@ extra-doc-files:
   CHANGELOG.md
   README.md
 
+-- Runtime fixtures and golden snapshots the core test-suite reads
+-- CWD-relative (see test/CoreSpec.hs). Listing them here is what makes an
+-- unpacked `cabal sdist` self-contained enough to run `cabal test` from the
+-- tarball; the test file intentionally keeps its plain-path reads.
 extra-source-files:
   examples/fault-policy.json
   proto/googleapis-LICENSE
   proto/remote-apis-LICENSE
+  test/golden/faults.json
+  test/golden/schedule.jsonl
 
 source-repository head
   type:     git

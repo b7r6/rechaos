@@ -194,7 +194,8 @@ data Rule = Rule
 
 {- | The inclusive upper bound on a firing probability expressed in parts per
   million: @1_000_000@ ppm = certainty. A 'Rule' with @chancePpm == maxPpm@
-  always fires; a value above it is out of range.
+  always fires; a value above it is out of range. @Rechaos.Shell.Json.validatePolicy@
+  enforces this bound at the decoder boundary via this constant.
 -}
 maxPpm :: Natural
 maxPpm = 1_000_000
@@ -211,9 +212,9 @@ mkRule t c f
   | otherwise = Just (Rule{target = t, chancePpm = c, fault = f})
 
 {- | The inclusive upper bound on a 'Dribble' chunk size in bytes: @4_194_304@
-  (4 MiB). The JSON shell enforces @1 <= chunkBytes <= maxDribbleChunkBytes@;
-  promoting the bound here keeps it a named Core fact rather than a magic literal
-  in the decoder.
+  (4 MiB). @Rechaos.Shell.Json.validatePolicy@ enforces
+  @1 <= chunkBytes <= maxDribbleChunkBytes@ via 'validFaultBounds', so the bound
+  is a named Core fact rather than a magic literal in the decoder.
 -}
 maxDribbleChunkBytes :: Natural
 maxDribbleChunkBytes = 4_194_304
@@ -225,8 +226,9 @@ maxDribbleChunkBytes = 4_194_304
         @1 .. 'maxDribbleChunkBytes'@ inclusive.
       * every other fault is unconstrained here (always 'True').
 
-  This records the invariant in Core; wiring it into the decoder is out of scope
-  for this module.
+  @Rechaos.Shell.Json.validatePolicy@ gates 'Dribble' acceptance on this
+  predicate at the decoder boundary, so the invariant is enforced here in Core
+  rather than duplicated as literals in the shell.
 -}
 validFaultBounds :: Fault -> Bool
 validFaultBounds (Dribble rate chunkBytes) =

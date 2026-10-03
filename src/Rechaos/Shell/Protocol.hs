@@ -7,12 +7,32 @@
 -- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {-# LANGUAGE OverloadedStrings #-}
 
+{- | proto-lens message inspection and stream edits for the REAPI/ByteStream
+traffic the proxy relays.
+
+This module reads just enough of each RPC's protobuf payload to drive fault
+injection without owning a full schema. It recovers blob and message sizes in
+bytes ('blobSize', 'messageSize'), computes the SHA-256 payload fingerprint the
+timeline records ('sha256'), and rewrites targeted messages when a fault fires:
+'payloadChunks' performs dribble re-chunking at protobuf message boundaries and
+'truncatePayload' clips a payload to its first @keepBytes@. The exported method
+constant strings ('readMethod', 'writeMethod', 'missingMethod') name the
+ByteStream and CAS methods the proxy special-cases. It is cited by
+@docs/ARCHITECTURE.md@.
+-}
 module Rechaos.Shell.Protocol (
+  -- * Sizing
   blobSize,
   messageSize,
+
+  -- * Fingerprint
   sha256,
+
+  -- * Stream edits
   payloadChunks,
   truncatePayload,
+
+  -- * Method names
   readMethod,
   writeMethod,
   missingMethod,
@@ -34,12 +54,25 @@ import Proto.Google.Bytestream.Bytestream_Fields qualified as F
 import Rechaos.Core.Types
 import Text.Read (readMaybe)
 
-readMethod, writeMethod, missingMethod, batchReadMethod, batchUpdateMethod :: Text
-readMethod = "google.bytestream.ByteStream/Read"
-writeMethod = "google.bytestream.ByteStream/Write"
-missingMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
+batchReadMethod, batchUpdateMethod :: Text
 batchReadMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs"
 batchUpdateMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs"
+
+{- | Fully-qualified @service/method@ name of the ByteStream @Read@ RPC, the
+streamed-download method the proxy special-cases for response sizing and edits.
+-}
+readMethod :: Text
+readMethod = "google.bytestream.ByteStream/Read"
+
+{- | Fully-qualified @service/method@ name of the ByteStream @Write@ RPC, the
+streamed-upload method the proxy special-cases for request sizing and edits.
+-}
+writeMethod :: Text
+writeMethod = "google.bytestream.ByteStream/Write"
+
+-- | Fully-qualified @service/method@ name of the CAS @FindMissingBlobs@ RPC.
+missingMethod :: Text
+missingMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
 
 getTreeMethod, getActionResultMethod, updateActionResultMethod :: Text
 getTreeMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree"
@@ -51,6 +84,10 @@ decode = decodeMessage . L.toStrict
 encode :: (Message a) => a -> L.ByteString
 encode = L.fromStrict . encodeMessage
 
+{- | Hash the lazy bytes with SHA-256 and return the lowercase hex rendering of
+the resulting @'Digest' 'SHA256'@. This is the payload fingerprint the
+timeline records and that replay checking compares.
+-}
 sha256 :: L.ByteString -> Text
 sha256 = T.pack . show . (hashlazy :: L.ByteString -> Digest SHA256)
 
@@ -59,6 +96,14 @@ resourceSize resource = case reverse (T.splitOn "/" resource) of
   size : _hash : rest | "blobs" `elem` rest || "compressed-blobs" `elem` rest -> readMaybe (T.unpack size)
   _ -> Nothing
 
+{- | The total content size in bytes that a message refers to, decoded from the
+payload for the given method, or 'Nothing' when the method is not understood
+or the bytes fail to decode. ByteStream @Read@/@Write@ requests report the
+size from their resource name (see 'readMethod', 'writeMethod'); CAS methods
+read digest @size_bytes@ fields, and the batch methods sum the sizes of all
+their sub-digests. This is the referenced blob size, not the wire size of the
+message itself (for that, use 'messageSize').
+-}
 blobSize :: Text -> L.ByteString -> Maybe Natural
 blobSize method bytes
   | method == readMethod =
@@ -121,6 +166,12 @@ blobSize method bytes
     map (^. R.digest . R.sizeBytes) (dir ^. R.files)
       ++ map (^. R.digest . R.sizeBytes) (dir ^. R.directories)
 
+{- | The size in bytes of the bulk payload carried by a single message. For a
+ByteStream @Read@ response or @Write@ request it is the length of the decoded
+@data@ chunk; for every other method, and whenever decoding fails, it falls
+back to the length of the raw wire bytes. Unlike 'blobSize' this measures the
+one message in hand, not the whole blob it belongs to.
+-}
 messageSize :: Text -> Direction -> L.ByteString -> Natural
 messageSize method direction bytes
   | method == readMethod && direction == Response =
@@ -137,8 +188,14 @@ messageSize method direction bytes
  where
   wireSize = fromIntegral (L.length bytes)
 
--- Split at protobuf message boundaries, never split a serialized protobuf into
--- invalid messages. Non-ByteStream RPCs are paced whole messages.
+{- | Re-chunk a message into dribble-sized pieces for a slow-trickle fault,
+returning each piece paired with its payload byte count. ByteStream @Read@
+responses and @Write@ requests are split along their @data@ field (capped at
+4 MiB per piece, with @Write@ pieces re-offset and the final-write flag moved
+to the last piece); every other RPC is paced as one whole message. Splitting
+always respects protobuf message boundaries, so no piece is an invalid
+message. Fails on a zero @chunk@ size or an out-of-range @Write@ offset.
+-}
 payloadChunks ::
   Text -> Direction -> Natural -> L.ByteString -> Either String [(Natural, L.ByteString)]
 payloadChunks method direction chunk bytes
@@ -176,6 +233,12 @@ payloadChunks method direction chunk bytes
     )
       : writeParts msg (offset + toInteger (B.length p)) ps
 
+{- | Clip a rewritable payload to its first @keep@ bytes, re-encoding the
+message. For a ByteStream @Read@ response or @Write@ request this keeps only
+the leading @keep@ bytes of the @data@ field (marking a truncated @Write@ as
+finished); messages of any other shape are not rewritable here and yield a
+'Left' rather than being altered.
+-}
 truncatePayload :: Text -> Direction -> Natural -> L.ByteString -> Either String L.ByteString
 truncatePayload method direction keep bytes
   | method == readMethod && direction == Response = do

@@ -79,10 +79,12 @@ timeline and `.outcomes.jsonl` on-disk schema.
 `truncate` applies only to ByteStream `Read` responses and `Write` requests
 (shortening a unary message would produce an invalid proto). `dribble`, `delay`,
 and `abort` apply to every supported method and direction — `dribble` paces a
-unary message as a single whole-message chunk. the supported-method allow-list in
-`validFault` is widening beyond `FindMissingBlobs`/`Read`/`Write` to cover the
-broader REAPI surface, so consult [`docs/fault-dsl.md`](docs/fault-dsl.md) for the
-exact set your build accepts. Methods outside the allow-list pass through. Targets
+unary message as a single whole-message chunk. The supported-method allow-list in
+`validFault` covers nine REAPI methods (ByteStream `Read`/`Write`; CAS
+`FindMissingBlobs`/`BatchUpdateBlobs`/`BatchReadBlobs`/`GetTree`; ActionCache
+`GetActionResult`/`UpdateActionResult`; `Capabilities/GetCapabilities`); see
+[`docs/fault-dsl.md`](docs/fault-dsl.md) for the exact set. Methods outside it
+pass through. Targets
 can constrain `direction`, `occurrence`, `messageIndex`, `minBlobBytes`,
 `maxBlobBytes`, `afterMicros`, and `beforeMicros`. The first matching rule owns
 the event; its `chancePpm` defaults to 1,000,000. Exactly one SplitMix64 step is
@@ -100,7 +102,8 @@ consumed per observed message.
 ./result/bin/rechaos schedule --policy examples/fault-policy.json \
   --trace runs/chaos.jsonl --output runs/recomputed.jsonl
 
-# Compare output directories from two successful builds (exit 1 = divergence).
+# Compare output directories from two successful builds (exit 0 equivalent,
+# 1 diverged, 2 inconclusive when an input is not a completed Built tree).
 ./result/bin/rechaos oracle runs/clean-output runs/chaos-output
 
 # Shrink a failure to a minimal witness that still triggers your checker.
@@ -114,7 +117,9 @@ event and its selected fault (including `null` for no fault). The determinism
 contract is **same policy + seed + event trace ⇒ same decisions**. Replay reports
 divergence instead of guessing. The oracle compares relative paths, SHA256 file
 digests and sizes, executable bits, symlink targets, and directories, ignoring
-timestamps. The shrinker is deletion-1-minimal for a repeatable checker under the
+timestamps. It reports `equivalent` (exit 0), `diverged` (exit 1), or
+`inconclusive` (exit 2); `inconclusive` means an input was not a completed
+`Built` tree, so `compareBuilds` had nothing to judge. The shrinker is deletion-1-minimal for a repeatable checker under the
 stated intensity steps.
 
 ## Commands
@@ -122,7 +127,7 @@ stated intensity steps.
 | Command | Purpose | Key flags |
 |---|---|---|
 | `serve` | Run the REAPI chaos gateway | `--upstream-host`, `--upstream-port`, `--host`, `--port`, `--policy`, `--replay`, `--sparse`, `--record`, `--max-call-seconds`, `--upstream-tls`, `--ca`, `--certificate`, `--key` |
-| `oracle` | Compare completed build output trees (exit 1 = divergence, 2 = error) | `CLEAN_TREE`, `CHAOS_TREE` |
+| `oracle` | Compare completed build output trees (exit 0 equivalent, 1 diverged, 2 inconclusive) | `CLEAN_TREE`, `CHAOS_TREE` |
 | `schedule` | Recompute decisions from a recorded event trace | `--policy`, `--trace`, `--output` |
 | `validate` | Validate a policy JSON file | `POLICY` |
 | `verify-replay` | Check every expected event was observed with matching fingerprints and faults | `EXPECTED_TIMELINE`, `OBSERVED_TIMELINE` |
@@ -137,7 +142,7 @@ checks a fixed set of invariants, deduplicates findings by signature, and freeze
 replayable reproducers.
 
 ```sh
-nix develop --command python3 scripts/chaos-monkey.py --host 127.0.0.1 --port 50052
+nix develop --command python3 scripts/chaos-monkey.py --host 127.0.0.1 --port 50070
 nix develop --command python3 scripts/chaos-monkey.py --only-direct --stop-on-finding
 nix develop --command python3 scripts/chaos-monkey.py --execution   # + scheduler stress
 ```

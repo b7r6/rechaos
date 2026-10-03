@@ -208,6 +208,17 @@ allow-list is:
 - `build.bazel.remote.execution.v2.ActionCache/UpdateActionResult`
 - `build.bazel.remote.execution.v2.Capabilities/GetCapabilities`
 
+This is the nine-method surface the gateway targets today; it is not
+"mid-migration" and will not silently grow. Some further REAPI methods are
+relayed by the proxy but are deliberately **not** fault-targetable:
+`ContentAddressableStorage/SplitBlob` and `ContentAddressableStorage/SpliceBlob`
+are forwarded byte-for-byte but are absent from `supportedMethods`, so naming
+either in a `target.method` is rejected with `policy targets an unsupported
+method` just like any other non-allow-listed method. The long-running
+`google.longrunning.Operations` surface and `Execution/Execute` are likewise
+forwarded-but-not-targetable (their messages are neither CAS blobs nor
+ByteStream payloads, so size targeting and payload rewriting are meaningless).
+
 ### Fault eligibility
 
 `validFault` enforces exactly one restriction, and it applies to `Truncate` only:

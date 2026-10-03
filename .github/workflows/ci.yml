@@ -1,12 +1,17 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #                                                                        // ci
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# One hermetic gate: `nix flake check` runs all three checks consistently —
-#   test   — builds the gateway and runs the pure core suite (seeded scheduler
-#            evaluation, JSON round-trips, targeting boundaries, replay
-#            mismatch/coverage, oracle algebra, shrinking, golden snapshots).
-#   format — fourmolu --mode check against the committed fourmolu.yaml.
-#   lint   — hlint against the committed .hlint.yaml.
+# One hermetic gate: `nix flake check` runs every check consistently —
+#   test       — builds the gateway and runs the pure core suite (seeded
+#                scheduler evaluation, JSON round-trips, targeting boundaries,
+#                replay mismatch/coverage, oracle algebra, shrinking, golden
+#                snapshots).
+#   format     — fourmolu --mode check against the committed fourmolu.yaml.
+#   lint       — hlint against the committed .hlint.yaml.
+#   docs       — builds Haddock for the package and fails on doc errors.
+#   cabalCheck — runs `cabal check` and fails on Hackage-metadata rot.
+# The `docs` and `cabalCheck` gates run automatically as part of
+# `nix flake check -L` below — no extra step is needed.
 # GitHub-compatible syntax; also runs under Forgejo/Gitea Actions.
 name: ci
 
@@ -25,5 +30,5 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - name: nix flake check (test + format + lint)
+      - name: nix flake check (test + format + lint + docs + cabalCheck)
         run: nix flake check -L

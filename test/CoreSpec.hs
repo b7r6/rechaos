@@ -12,13 +12,13 @@
 module Main (main) where
 
 import Control.Monad (unless)
-import Data.Aeson (decode, eitherDecode, encode)
+import Data.Aeson (decode, eitherDecode, encode, object, (.=))
 import Data.ByteString.Lazy qualified as L
 import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.List (sort)
 import Data.Map.Strict qualified as M
 import Data.Text qualified as T
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
 import Numeric.Natural (Natural)
 import Rechaos.Core.Minimize qualified as Min
 import Rechaos.Core.Oracle qualified as O
@@ -427,6 +427,47 @@ main = do
   check "dribble micros are ceiling-minimal: one microsecond less under-delivers" $ \(Positive r) (Positive b) ->
     let rate = fromIntegral (r :: Int); bytes = fromIntegral (b :: Int)
      in maybe False (\us -> us == 0 || (us - 1) * rate < bytes * 1000000) (dribbleMicros rate bytes)
+  -- (M) status code table -----------------------------------------------------
+  check "statusFromCode inverts statusCode for every Status" $ \(s :: Status) ->
+    statusFromCode (statusCode s) == Just s
+  check "the nine documented gRPC codes are pinned exactly" $
+    map statusCode [minBound .. maxBound]
+      == [1, 3, 4, 5, 8, 9, 13, 14, 15]
+      && [ statusCode Cancelled
+         , statusCode InvalidArgument
+         , statusCode DeadlineExceeded
+         , statusCode NotFound
+         , statusCode ResourceExhausted
+         , statusCode FailedPrecondition
+         , statusCode Internal
+         , statusCode Unavailable
+         , statusCode DataLoss
+         ]
+        == [1, 3, 4, 5, 8, 9, 13, 14, 15]
+  check "excluded gRPC codes decode to Nothing" $
+    all ((== Nothing) . statusFromCode) excludedCodes
+  -- (N) mkRule / maxPpm bounds -------------------------------------------------
+  check "mkRule rejects iff chancePpm exceeds maxPpm" $ \(t :: Target) (f :: Fault) ->
+    forAll (fromIntegral <$> chooseInt (0, 2000000)) $ \c ->
+      (mkRule t c f == Nothing) == (c > maxPpm)
+  check "mkRule accepts the inclusive maxPpm boundary" $ \(t :: Target) (f :: Fault) ->
+    mkRule t maxPpm f == Just (Rule t maxPpm f)
+  check "decoder accepts chancePpm=maxPpm and rejects maxPpm+1" $ \(r :: Rule) ->
+    let atCap = r{chancePpm = maxPpm}
+        overCap = encodePolicyWithPpm r (maxPpm + 1)
+     in decodePolicy (encode (Policy 0 [atCap])) == Just (Policy 0 [atCap])
+          && decodePolicy overCap == Nothing
+  -- (O) validFaultBounds / maxDribbleChunkBytes --------------------------------
+  check "decoder accepts a dribble rule iff validFaultBounds holds" $
+    forAll (fromIntegral <$> chooseInt (0, 3)) $ \rate ->
+      forAll (fromIntegral <$> chooseInt (0, 3)) $ \chunk ->
+        isRight (decodeDribbleRule rate chunk) == validFaultBounds (Dribble rate chunk)
+  check "dribble chunk boundary: maxDribbleChunkBytes accepted, +1 rejected" $
+    isRight (decodeDribbleRule 1 maxDribbleChunkBytes)
+      && not (isRight (decodeDribbleRule 1 (maxDribbleChunkBytes + 1)))
+  check "dribble rejects zero chunk and zero rate" $
+    not (isRight (decodeDribbleRule 1 0))
+      && not (isRight (decodeDribbleRule 0 16))
   -- (L) golden snapshots ------------------------------------------------------
   goldenSnapshots
  where
@@ -457,6 +498,54 @@ main = do
     ]
   isRight (Right _) = True
   isRight _ = False
+  -- The standard gRPC codes the Status haddock deliberately excludes:
+  -- OK(0), Unknown(2), AlreadyExists(6), PermissionDenied(7), Aborted(10),
+  -- OutOfRange(11), Unimplemented(12), Unauthenticated(16).
+  excludedCodes :: [Word8]
+  excludedCodes = [0, 2, 6, 7, 10, 11, 12, 16]
+  decodePolicy :: L.ByteString -> Maybe Policy
+  decodePolicy = decode
+  -- Encode a Policy carrying a single rule at an arbitrary chancePpm, bypassing
+  -- mkRule's bound so the over-cap value survives into the JSON to be rejected on
+  -- decode. Builds the object by hand because the Rule encoder has no out-of-range path.
+  encodePolicyWithPpm :: Rule -> Natural -> L.ByteString
+  encodePolicyWithPpm r ppm =
+    encode $
+      object
+        [ "version" .= (1 :: Int)
+        , "seed" .= (0 :: Word64)
+        , "rules"
+            .= [ object
+                   [ "target" .= target r
+                   , "chancePpm" .= ppm
+                   , "fault" .= fault r
+                   ]
+               ]
+        ]
+  -- Round a dribble rule through the shell decoder on a stream-payload target.
+  decodeDribbleRule :: Natural -> Natural -> Either String Policy
+  decodeDribbleRule rate chunk =
+    eitherDecode $
+      encode $
+        object
+          [ "version" .= (1 :: Int)
+          , "seed" .= (0 :: Word64)
+          , "rules"
+              .= [ object
+                     [ "target"
+                         .= object
+                           [ "method" .= ("google.bytestream.ByteStream/Read" :: T.Text)
+                           , "direction" .= ("response" :: T.Text)
+                           ]
+                     , "fault"
+                         .= object
+                           [ "kind" .= ("dribble" :: T.Text)
+                           , "bytesPerSecond" .= rate
+                           , "chunkBytes" .= chunk
+                           ]
+                     ]
+                 ]
+          ]
   tree ns =
     M.fromList [(T.pack (show i), O.File (T.pack (show n)) 1 False) | (i, n) <- zip [(0 :: Int) ..] ns]
   minimize :: (Timeline -> Bool) -> Int -> Min.ShrinkState -> Timeline

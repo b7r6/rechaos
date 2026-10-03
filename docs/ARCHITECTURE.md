@@ -133,8 +133,15 @@ replay), while identity, blob size, message size, and payload hash must all
 agree exactly. Mechanically:
 
 ```haskell
-sameEvent a b = a{eElapsedMicros = 0} == b{eElapsedMicros = 0}
+sameEvent a b = fingerprint a == fingerprint b
 ```
+
+The `Fingerprint` newtype exists so the compared field set is a single named
+value rather than an emergent property of zeroing `eElapsedMicros` before a
+record equality check. `fingerprint` projects an `Event` onto exactly its
+identity-significant fields, in the tuple shape `(eMethod, eOccurrence,
+eDirection, eMessageIndex, eBlobBytes, eMessageBytes, ePayloadHash)` —
+everything except `eElapsedMicros`.
 
 The event identity used for lookup is the `EventKey` tuple
 `(method, occurrence, direction, messageIndex)`, which must be unique across a

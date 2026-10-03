@@ -210,7 +210,10 @@ handlers r c cap =
   , handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"BatchReadBlobs" r c cap
   , handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"BatchUpdateBlobs" r c cap
   , handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"GetTree" r c cap
-  , handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"SplitBlob" r c cap
+  , -- SplitBlob/SpliceBlob are relayed byte-for-byte but are NOT in the
+    -- fault-eligible 'supportedMethods' allow-list (see "Rechaos.Shell.Json"):
+    -- they are passthrough-forwarded only, so a policy cannot target them yet.
+    handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"SplitBlob" r c cap
   , handler @"build.bazel.remote.execution.v2.ContentAddressableStorage" @"SpliceBlob" r c cap
   , handler @"build.bazel.remote.execution.v2.Capabilities" @"GetCapabilities" r c cap
   , handler @"build.bazel.remote.execution.v2.ActionCache" @"GetActionResult" r c cap
