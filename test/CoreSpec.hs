@@ -571,6 +571,7 @@ main = do
       Just _ -> do
         L.writeFile "test/golden/schedule.jsonl" scheduleBytes
         L.writeFile "test/golden/faults.json" faultBytes
+        L.writeFile "test/golden/decisions.jsonl" decisionsBytes
         putStrLn "golden snapshots regenerated"
       Nothing -> do
         putStrLn "golden schedule snapshot matches committed bytes"
@@ -587,6 +588,22 @@ main = do
         let splitmixRows = mapMaybe decode splitmixLines :: [(Word64, Word64, Word64)]
         unless (length splitmixRows == length splitmixLines) exitFailure
         unless (all (\(s, o, st) -> nextSeed s == (st, o)) splitmixRows) exitFailure
+        -- Reference-leads scheduler conformance: the committed gate corpus (shared
+        -- with the Lean model's fires_conforms_on_gateScope native_decide anchor)
+        -- must be reproduced row-by-row by the reference probability gate in step.
+        -- Each row is [seed, chancePpm, fires?]; parse and re-derive via step.
+        putStrLn "reference step reproduces the committed probability-gate corpus"
+        gateLines <- LC.lines <$> L.readFile "test/golden/gate.jsonl"
+        let gateRows = mapMaybe decode gateLines :: [(Word64, Natural, Bool)]
+        unless (length gateRows == length gateLines) exitFailure
+        unless (all (\(s, c, fired) -> gateFiresRef s c == fired) gateRows) exitFailure
+        -- Reference-leads decisions conformance: the committed decisions corpus
+        -- (shared with the Lean schedule_conforms_on_decisionScope anchor) is a
+        -- byte snapshot of the reference schedule over the corpus scope. The
+        -- reference must reproduce those exact bytes.
+        putStrLn "reference schedule reproduces the committed decisions corpus"
+        onDiskDecisions <- L.readFile "test/golden/decisions.jsonl"
+        unless (onDiskDecisions == decisionsBytes) exitFailure
   -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
   goldenFaultRules :: [Rule]
   goldenFaultRules =
@@ -595,6 +612,68 @@ main = do
     , Rule targetAll 100000 (Dribble 1024 16)
     , Rule targetAll 750000 (Truncate 64)
     ]
+  -- ── reference-leads scheduler corpora (kept byte-identical to the shapes
+  --    scripts/gen-conformance.hs emits; regenerate both via that script) ──────
+  -- The reference probability gate, read back through the real step: fired iff
+  -- the single always-matching rule injected. Mirrors gateFires in the generator.
+  gateFiresRef :: Word64 -> Natural -> Bool
+  gateFiresRef s c =
+    let gt = Target "m" Response Nothing Nothing Nothing Nothing Nothing Nothing
+        ge = Event "m" 1 Response 1 Nothing 0 0 ""
+     in injection (snd (step [Rule gt c (Delay 1)] s ge)) /= Nothing
+  -- The decisions scope: identical policies and trace to the generator, so the
+  -- reference schedule reproduces the committed decisions.jsonl byte-for-byte.
+  decisionMRead, decisionMWrite :: T.Text
+  decisionMRead = "google.bytestream.ByteStream/Read"
+  decisionMWrite = "google.bytestream.ByteStream/Write"
+  decisionTrace :: [Event]
+  decisionTrace =
+    [ Event decisionMRead 1 Response 1 (Just 100) 500 100 "h1"
+    , Event decisionMRead 1 Response 2 (Just 2048) 1500 100 "h2"
+    , Event decisionMRead 2 Response 1 Nothing 3000 100 "h3"
+    , Event decisionMWrite 1 Request 1 (Just 64) 250 100 "h4"
+    , Event decisionMWrite 1 Request 2 (Just 4096) 9000 100 "h5"
+    , Event decisionMRead 3 Response 1 (Just 100) 20000 100 "h6"
+    ]
+  decisionPolicies :: [Policy]
+  decisionPolicies =
+    [ Policy 1 []
+    , Policy 1 [Rule dReadAll 1000000 (Delay 100)]
+    , Policy 1 [Rule dReadAll 0 (Abort Internal)]
+    , Policy 2 [Rule dReadAll 500000 (Delay 7)]
+    , Policy 7 [Rule dReadBlob 1000000 (Truncate 64), Rule dReadAll 1000000 (Delay 1)]
+    , Policy 7 [Rule dReadOcc 1000000 (Abort NotFound), Rule dReadAll 1000000 (Delay 1)]
+    , Policy 42 [Rule dReadAfter 1000000 (Dribble 1024 16), Rule dReadAll 0 (Delay 1)]
+    , Policy 12345 [Rule dWriteReq 1000000 (Abort Unavailable), Rule dReadAll 300000 (Delay 5)]
+    , Policy 0xdeadbeefcafef00d [Rule dReadAll 400000 (Delay 1), Rule dReadBlob 1000000 (Truncate 8)]
+    ]
+   where
+    dReadAll = Target decisionMRead Response Nothing Nothing Nothing Nothing Nothing Nothing
+    dReadBlob = Target decisionMRead Response Nothing Nothing (Just 1000) Nothing Nothing Nothing
+    dReadOcc = Target decisionMRead Response (Just 2) Nothing Nothing Nothing Nothing Nothing
+    dReadAfter = Target decisionMRead Response Nothing Nothing Nothing Nothing (Just 10000) Nothing
+    dWriteReq = Target decisionMWrite Request Nothing Nothing Nothing Nothing Nothing Nothing
+  -- The committed decisions.jsonl bytes, built from the reference schedule.
+  decisionsBytes :: L.ByteString
+  decisionsBytes = LC.unlines [decisionRow p | p <- decisionPolicies]
+   where
+    decisionRow p =
+      let tl = schedule p decisionTrace
+       in LC.concat
+            [ LC.pack "{\"seed\":"
+            , LC.pack (show (seed p))
+            , LC.pack ",\"ruleCount\":"
+            , LC.pack (show (length (rules p)))
+            , LC.pack ",\"injections\":["
+            , LC.intercalate (LC.pack ",") (map (jsonFault . injection) tl)
+            , LC.pack "]}"
+            ]
+    jsonFault Nothing = LC.pack "null"
+    jsonFault (Just (Delay n)) = LC.pack ("{\"delay\":" ++ show n ++ "}")
+    jsonFault (Just (Abort st)) = LC.pack ("{\"abort\":" ++ show (statusCode st) ++ "}")
+    jsonFault (Just (Dribble rate chunk)) =
+      LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
+    jsonFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
   isRight (Right _) = True
   isRight _ = False
   -- All but the last element; total (empty on lists of length < 2).

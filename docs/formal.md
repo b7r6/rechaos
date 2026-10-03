@@ -119,6 +119,95 @@ chaos oracle depend on: same policy + same seed + same event trace ⇒ same
 decisions. It is a one-line corollary of `iter_add`, so determinism of the
 concrete keystream follows for free from the abstract additivity lemma.
 
+## The scheduler layer
+
+On top of the keystream, the verified core now models the whole scheduler:
+targeting (`matches`), the probability gate, first-match selection (`choose`), the
+single-event `step`, and the trace-level `schedule`. The Lean port lives in
+[`lean/Rechaos/Scheduler.lean`](../lean/Rechaos/Scheduler.lean) over the type port
+in [`lean/Rechaos/Types.lean`](../lean/Rechaos/Types.lean), and is faithful to the
+Haskell reference [`src/Rechaos/Core/Scheduler.hs`](../src/Rechaos/Core/Scheduler.hs).
+
+The same discipline as the keystream holds: **the Haskell reference leads**. All
+concrete behaviour (the exact probability-gate arithmetic and the full
+first-match decisions) is pinned to the reference by corpora that
+`scripts/gen-conformance.hs` generates *by running the real Haskell functions*,
+and that both sides re-verify. The abstract first-match *selection law* is proved
+in Lean by structural induction, needing no corpus.
+
+### Definition map: Haskell → Lean (scheduler)
+
+| Concept | Haskell (`Rechaos.Core.Scheduler`) | Lean (`Rechaos.Scheduler`) |
+|---|---|---|
+| Target predicate | `matches :: Target -> Event -> Bool` | `matchesTarget (tgt : Target) (evt : Event) : Bool` |
+| Probability gate | `draw \`mod\` ppmDenominator < chancePpm` (in `step`) | `fires (chancePpm : Nat) (draw : UInt64) : Bool` |
+| First-match selection | `choose` (nested in `step`) | `choose (rules : List Rule) (draw : UInt64) (evt : Event) : Option Fault` |
+| One decision | `step :: [Rule] -> Word64 -> Event -> (Word64, Decision)` | `step (rules) (state : UInt64) (evt : Event) : UInt64 × Decision` |
+| Whole trace | `schedule :: Policy -> [Event] -> Timeline` | `schedule (policy : Policy) (events : List Event) : Timeline` |
+
+`matches` is a reserved keyword in Lean, so the port names it `matchesTarget`; the
+behaviour is identical. The draw is the SplitMix64 *output* half — Haskell `snd`,
+Lean `.1` — and the seed advances by the *state* half (`fst` / `.2`) exactly once
+per event, whether or not any rule matched.
+
+### Proved in Lean (abstract, no corpus)
+
+These are in `lean/Rechaos/Scheduler.lean`, proved by structural induction with no
+`UInt64` arithmetic forced in the kernel:
+
+- **first-match SELECTION** — the heart of the layer:
+  - `choose_nil` — no rules ⇒ no injection.
+  - `choose_skips_nonmatching` — a leading rule whose target misses is transparent;
+    selection continues with the tail.
+  - `choose_first_match` — when the leading rule's target matches, the outcome is
+    decided entirely by that rule's gate; the tail is never consulted.
+  - `choose_first_match_fires` / `choose_first_match_shut` — the sharp corollaries:
+    a matching head that fires injects *its* fault; a matching head that stays shut
+    passes through (and still does not fall through to the tail).
+  - `choose_head_owns_independent_of_tail` — "the first matching rule owns the
+    event": if the head matches, swapping the entire tail leaves the decision
+    unchanged. This rules out accidental fallthrough to a lower-priority rule.
+- **gate endpoints** — `fires_zero_never` (0 ppm never fires, any draw) and
+  `fires_full_always` (`ppmDenominator` ppm always fires, any draw), both abstract
+  over the draw.
+- **step / schedule structure** — `step_advances_once` (one state-advance per
+  event, regardless of match), `step_preserves_event`, `step_injection_eq_choose`,
+  `step_nil_passthrough`, `schedule_length` / `scheduleFrom_length` (exactly one
+  decision per event), and `schedule_events` / `scheduleFrom_events` (decisions are
+  made for exactly the input trace, in order).
+
+### Reference-leads differential (corpus, `native_decide`)
+
+`scripts/gen-conformance.hs` runs the real Haskell `step` / `schedule` and emits
+two corpora, each as a JSON golden *and* as Lean terms in
+[`lean/Rechaos/SchedulerCorpus.lean`](../lean/Rechaos/SchedulerCorpus.lean):
+
+- **probability gate** — `test/golden/gate.jsonl` rows `[seed, chancePpm, fires?]`
+  over every keystream seed × a ppm ladder that straddles the midpoint (so the
+  strict `<` is exercised on both sides). The Lean theorem
+  `fires_conforms_on_gateScope` checks, by `native_decide`, that
+  `fires chancePpm (nextSeed seed).1` reproduces the reference `fires?` on every
+  row. This is the subtle arithmetic differential.
+- **scheduler decisions** — `test/golden/decisions.jsonl`, a byte snapshot of the
+  reference `schedule` over a scope of nine policies (empty, always/never, several
+  first-match shadowing pairs, predicate-gated rules) against a six-event trace
+  spanning both directions, occurrences, present/absent blobs and the elapsed-time
+  boundary. The Lean theorem `schedule_conforms_on_decisionScope` checks, by
+  `native_decide`, that the Lean `schedule` produces exactly the reference's
+  injected-fault list for every case.
+
+On the Haskell side, `CoreSpec.hs`'s golden-snapshot block re-derives both corpora
+from the reference and fails if the committed bytes/rows do not reproduce (the gate
+corpus row-by-row through `step`; the decisions corpus byte-for-byte through
+`schedule`). The goldens are listed in `rechaos.cabal`'s `extra-source-files` so an
+unpacked `cabal sdist` can read them. Both goldens are regenerated — alongside the
+SplitMix64 corpus and the Lean files — by `scripts/gen-conformance.hs`.
+
+The Lean scheduler is therefore **differentially conformant to the reference** on
+both the probability gate and the full first-match decisions over the committed
+scope, and the first-match selection semantics is additionally proved abstractly
+for all rule lists, draws, and events.
+
 ## Machine-checked in Lean vs. QuickCheck-only in Haskell
 
 It is important to be precise about the boundary between what the Lean kernel has
@@ -142,8 +231,12 @@ the kernel, not by examples.
 - The seed-advance invariants (G): that `foldl` over `step` equals
   `iterate (fst . nextSeed) s !! n`, and that a nonmatching/absent rule advances
   the seed identically to a match. The Lean `iter`/`advance` model *captures the
-  abstract shape* of this claim, but the specific tie between the Haskell `step`
-  function, first-match targeting, and `iter` is exercised only by QuickCheck.
+  abstract shape* of this claim; the Lean `Scheduler` port now additionally
+  proves the single-step `step_advances_once` and the `schedule_length` /
+  `schedule_events` structure, and pins the concrete first-match decisions to the
+  reference via the `native_decide` corpora (see "The scheduler layer" above). The
+  exact bit-level tie between `iterate (fst . nextSeed)` and the production fold is
+  still exercised by QuickCheck.
 - Everything outside the keystream: the status-code bijection, dribble pacing,
   shrinker 1-minimality, oracle equivalence/transitivity, replay
   incomplete-vs-changed semantics, and JSON round-trips. These live entirely in

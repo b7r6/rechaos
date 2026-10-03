@@ -37,7 +37,9 @@ extra-source-files:
   examples/fault-policy.json
   proto/googleapis-LICENSE
   proto/remote-apis-LICENSE
+  test/golden/decisions.jsonl
   test/golden/faults.json
+  test/golden/gate.jsonl
   test/golden/schedule.jsonl
   test/golden/splitmix.jsonl
 

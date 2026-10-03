@@ -1,0 +1,9 @@
+{"seed":1,"ruleCount":0,"injections":[null,null,null,null,null,null]}
+{"seed":1,"ruleCount":1,"injections":[{"delay":100},{"delay":100},{"delay":100},null,null,{"delay":100}]}
+{"seed":1,"ruleCount":1,"injections":[null,null,null,null,null,null]}
+{"seed":2,"ruleCount":1,"injections":[{"delay":7},null,{"delay":7},null,null,null]}
+{"seed":7,"ruleCount":2,"injections":[{"delay":1},{"truncate":64},{"delay":1},null,null,{"delay":1}]}
+{"seed":7,"ruleCount":2,"injections":[{"delay":1},{"delay":1},{"abort":5},null,null,{"delay":1}]}
+{"seed":42,"ruleCount":2,"injections":[null,null,null,null,null,{"dribble":[1024,16]}]}
+{"seed":12345,"ruleCount":2,"injections":[null,null,null,{"abort":14},{"abort":14},{"delay":5}]}
+{"seed":16045690984503111693,"ruleCount":2,"injections":[null,null,{"delay":1},null,null,{"delay":1}]}
