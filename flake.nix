@@ -122,6 +122,32 @@
             cabal check
             touch "$out"
           '';
+          # Proof gate: the Lean 4 verified core must compile under Lean 4.30
+          # with zero proof holes. We copy ./lean into a writable tree (lake
+          # writes .lake/), point HOME there, and run `lake build` fully offline
+          # — no Mathlib, no network, pkgs.lean4 supplies the toolchain. The
+          # grep guards reject any `sorry`/`admit` that would let the kernel
+          # accept an unproved goal; the `[^`]` prefix skips the backtick-quoted
+          # word "sorry" in Core.lean's own doc comment (a mention, not a hole).
+          lean = b.pkgs.runCommand "rechaos-lean" {
+            nativeBuildInputs = [ b.pkgs.lean4 ];
+          } ''
+            cp -r ${./lean} ./lean
+            chmod -R u+w ./lean
+            export HOME="$PWD/.home"
+            mkdir -p "$HOME"
+            if grep -rnE '(^|[^`])sorry' ./lean/Rechaos; then
+              echo "forbidden: 'sorry' found in Lean proofs" >&2
+              exit 1
+            fi
+            if grep -rnE '(^|[^`])admit' ./lean/Rechaos; then
+              echo "forbidden: 'admit' found in Lean proofs" >&2
+              exit 1
+            fi
+            cd ./lean
+            lake build
+            touch "$out"
+          '';
         });
       devShells = eachSystem (system:
         let b = build system;

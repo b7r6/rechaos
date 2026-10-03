@@ -10,7 +10,9 @@
 #   lint       — hlint against the committed .hlint.yaml.
 #   docs       — builds Haddock for the package and fails on doc errors.
 #   cabalCheck — runs `cabal check` and fails on Hackage-metadata rot.
-# The `docs` and `cabalCheck` gates run automatically as part of
+#   lean       — compiles the Lean 4 verified core under Lean 4.30 and fails
+#                on any `sorry`/`admit`, machine-checking the determinism proofs.
+# The `docs`, `cabalCheck`, and `lean` gates run automatically as part of
 # `nix flake check -L` below — no extra step is needed.
 # GitHub-compatible syntax; also runs under Forgejo/Gitea Actions.
 name: ci
@@ -30,5 +32,5 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - name: nix flake check (test + format + lint + docs + cabalCheck)
+      - name: nix flake check (test + format + lint + docs + cabalCheck + lean)
         run: nix flake check -L
