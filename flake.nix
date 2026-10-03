@@ -42,7 +42,7 @@
             nativeBuildInputs = [ b.pkgs.haskellPackages.fourmolu ];
           } ''
             cd ${b.haskellSrc}
-            fourmolu --mode check app src test
+            fourmolu --mode check -o -XImportQualifiedPost app src test
             touch "$out"
           '';
           # Lint gate: hlint honoring ./.hlint.yaml.
@@ -50,7 +50,7 @@
             nativeBuildInputs = [ b.pkgs.haskellPackages.hlint ];
           } ''
             cd ${b.haskellSrc}
-            hlint --hint=.hlint.yaml app src test
+            hlint -XImportQualifiedPost --hint=.hlint.yaml app src test
             touch "$out"
           '';
         });

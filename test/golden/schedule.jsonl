@@ -1,0 +1,5 @@
+{"event":{"blobBytes":100,"direction":"response","elapsedMicros":500,"messageBytes":100,"messageIndex":1,"method":"google.bytestream.ByteStream/Read","occurrence":1,"payloadHash":"abc"},"injection":null,"version":1}
+{"event":{"blobBytes":100,"direction":"response","elapsedMicros":500,"messageBytes":100,"messageIndex":1,"method":"google.bytestream.ByteStream/Read","occurrence":2,"payloadHash":"abc"},"injection":{"kind":"delay","micros":100},"version":1}
+{"event":{"blobBytes":100,"direction":"response","elapsedMicros":500,"messageBytes":100,"messageIndex":1,"method":"google.bytestream.ByteStream/Read","occurrence":3,"payloadHash":"abc"},"injection":null,"version":1}
+{"event":{"blobBytes":100,"direction":"response","elapsedMicros":500,"messageBytes":100,"messageIndex":1,"method":"google.bytestream.ByteStream/Read","occurrence":4,"payloadHash":"abc"},"injection":null,"version":1}
+{"event":{"blobBytes":100,"direction":"response","elapsedMicros":500,"messageBytes":100,"messageIndex":1,"method":"google.bytestream.ByteStream/Read","occurrence":5,"payloadHash":"abc"},"injection":null,"version":1}

@@ -8,17 +8,28 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Rechaos.Shell.Minimize (minimizeTimeline) where
+{- | The shell driver for timeline minimization: run a user-supplied checker
+against candidate timelines, under trial timeouts, until the pure core's
+delta-debugger converges on a minimal fault set that still reproduces a signature.
+
+This module is in the IO shell. It spawns checker subprocesses, enforces
+per-trial timeouts and process-group kills, and persists trial evidence; the
+search strategy itself lives in "Rechaos.Core.Minimize".
+-}
+module Rechaos.Shell.Minimize (
+  -- * Shell driver
+  minimizeTimeline,
+) where
 
 import Control.Exception (IOException, catch)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
-import qualified Data.ByteString.Lazy.Char8 as L
+import Data.ByteString.Lazy.Char8 qualified as L
 import Data.IORef
 import Data.Maybe (isJust)
 import Data.Text (Text)
-import qualified Rechaos.Core.Minimize as M
+import Rechaos.Core.Minimize qualified as M
 import Rechaos.Core.Types
 import Rechaos.Shell.Json
 import System.Environment (getEnvironment)
@@ -28,8 +39,14 @@ import System.IO
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Signals (sigKILL, signalProcessGroup)
 import System.Process
-import qualified System.Timeout as Timeout
+import System.Timeout qualified as Timeout
 
+{- | Minimize the firing faults in @input@ down to a smallest reproducing subset,
+writing the witness to @output@: it confirms the baseline reproduces, drives
+the core delta-debugger by running @command@ (up to @maxTrials@ trials, each
+repeated @repetitions@ times under a per-run @timeoutSeconds@ cap) until it
+converges on faults still matching @signature@, retaining trial evidence.
+-}
 minimizeTimeline :: FilePath -> FilePath -> String -> Text -> Int -> Int -> Int -> IO ()
 minimizeTimeline input output command signature repetitions timeoutSeconds maxTrials = do
   unless (repetitions > 0 && timeoutSeconds > 0 && timeoutSeconds <= 86400 && maxTrials > 0) $

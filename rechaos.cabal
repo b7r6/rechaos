@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               rechaos
-version:            0.1.0
+version:            0.1.0.0
 synopsis:
   Black-box chaos and determinism tool for the Bazel Remote Execution API
 
@@ -129,6 +129,8 @@ executable rechaos
   import:         warnings
   hs-source-dirs: app
   main-is:        Main.hs
+  other-modules:  Paths_rechaos
+  autogen-modules: Paths_rechaos
   ghc-options:    -threaded -rtsopts
   build-depends:
     , aeson                >=2.2

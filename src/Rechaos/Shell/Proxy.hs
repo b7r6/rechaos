@@ -11,7 +11,21 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Rechaos.Shell.Proxy (handlers, grpcStatus) where
+{- | The faulting gRPC gateway: a transparent proxy that pumps each RPC between
+a downstream client and the real upstream server, consulting the 'Runtime' at
+every message to decide whether to delay, abort, dribble, or truncate it.
+
+This module is in the IO shell. It owns all transport effects -- pacing,
+stream editing, deadlines, metadata forwarding, and cancellation -- and defers
+every scheduling choice to the pure core via 'Rechaos.Shell.Runtime.decide'.
+-}
+module Rechaos.Shell.Proxy (
+  -- * Handler table
+  handlers,
+
+  -- * Status mapping
+  grpcStatus,
+) where
 
 import Control.Concurrent.Async
 import Control.Exception
@@ -19,19 +33,20 @@ import Control.Monad (forM_, void)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import GHC.TypeLits (KnownSymbol, symbolVal)
-import qualified Network.GRPC.Client as C
+import Network.GRPC.Client qualified as C
 import Network.GRPC.Common
 import Network.GRPC.Common.Headers
-import qualified Network.GRPC.Server as S
+import Network.GRPC.Server qualified as S
 import Rechaos.Core.Scheduler (dribbleMicros)
 import Rechaos.Core.Types
 import Rechaos.Shell.Protocol
 import Rechaos.Shell.Runtime
 import Rechaos.Shell.Wire
-import qualified System.Timeout as Timeout
+import System.Timeout qualified as Timeout
 
+-- | Map a core 'Status' onto the grapesy @grpc-status@ error it injects.
 grpcStatus :: Status -> GrpcError
 grpcStatus s = case s of
   Cancelled -> GrpcCancelled
@@ -182,6 +197,10 @@ withIsolatedFailure connection params proxy action = do
       Left e -> throwIO (e :: SomeException)
       Right () -> throwIO (grpcException GrpcInternal "missing RPC result")
 
+{- | The full table of proxied RPC handlers: one faulting handler per supported
+ByteStream, REAPI, long-running, and health method, each sharing @runtime@,
+the upstream @connection@, and the per-call deadline cap in seconds.
+-}
 handlers :: Runtime -> C.Connection -> Int -> [S.SomeRpcHandler IO]
 handlers r c cap =
   [ handler @"google.bytestream.ByteStream" @"Read" r c cap

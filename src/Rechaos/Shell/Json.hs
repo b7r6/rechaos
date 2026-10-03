@@ -14,16 +14,17 @@ module Rechaos.Shell.Json (
   writeTimeline,
   decodeLines,
   validatePolicy,
+  payloadRewriting,
 ) where
 
 import Control.Monad (unless, when)
 import Data.Aeson
-import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser)
-import qualified Data.ByteString.Lazy as L
-import qualified Data.ByteString.Lazy.Char8 as LC
+import Data.ByteString.Lazy qualified as L
+import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Rechaos.Core.Scheduler (validateTimeline)
 import Rechaos.Core.Types
 
@@ -176,10 +177,22 @@ instance FromJSON Decision where
 validatePolicy :: Policy -> Either Text ()
 validatePolicy = mapM_ (\r -> validFault (tMethod (target r)) (tDirection (target r)) (fault r)) . rules
 
-{- | The full fault-eligible REAPI surface. Delay and Abort operate on raw bytes
-and are legal on every method here; Truncate/Dribble stay restricted to the
-ByteStream streaming payloads (see 'validFault'). Keep these strings in lockstep
-with the proxy handlers in "Rechaos.Shell.Proxy".
+{- | The full fault-eligible REAPI surface and the canonical source of truth for
+policy targeting. 'Delay' and 'Abort' operate on raw bytes and are legal on
+every method here; the payload-rewriting faults ('Truncate' and 'Dribble', see
+'payloadRewriting') stay restricted to the ByteStream streaming payloads (see
+'validFault').
+
+Keep these strings in lockstep with the proxy handlers in "Rechaos.Shell.Proxy".
+The proxy forwards additional long-running methods (notably the
+@google.longrunning.Operations@ surface and @Execution/Execute@) that are
+deliberately /excluded/ from this list: their messages are neither CAS blobs nor
+ByteStream payloads, so neither size targeting ('blobSize' returns 'Nothing' for
+them) nor payload rewriting is meaningful, and admitting them would let a policy
+silently match nothing. They are therefore excluded from policy targeting rather
+than silently accepted. If a future task widens this list to those methods, keep
+'validFault' correct: message-agnostic faults ('Delay'/'Abort') are allowed while
+payload-rewriting faults must stay rejected for the non-streaming methods.
 -}
 supportedMethods :: [Text]
 supportedMethods =
@@ -194,15 +207,33 @@ supportedMethods =
   , "build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
   ]
 
+{- | Payload-rewriting faults mutate the bytes of a message in flight and so can
+only be applied where rechaos knows how to decode, edit, and re-encode the
+streaming payload (ByteStream 'Read' responses and 'Write' requests). 'Delay'
+and 'Abort' are message-agnostic and are /not/ payload-rewriting.
+-}
+payloadRewriting :: Fault -> Bool
+payloadRewriting Truncate{} = True
+payloadRewriting Dribble{} = True
+payloadRewriting Delay{} = False
+payloadRewriting Abort{} = False
+
 validFault :: Text -> Direction -> Fault -> Either Text ()
 validFault method direction f
-  | method `notElem` supportedMethods = Left "policy targets an unsupported method"
-  | Truncate _ <- f, not streamPayload = Left "truncate requires Read response or Write request"
+  | method `notElem` supportedMethods =
+      Left ("policy targets an unsupported method: " <> method)
+  | Truncate{} <- f
+  , not streamPayload =
+      Left (faultName f <> " requires a ByteStream Read response or Write request")
   | otherwise = Right ()
  where
   streamPayload =
     (method == "google.bytestream.ByteStream/Read" && direction == Response)
       || (method == "google.bytestream.ByteStream/Write" && direction == Request)
+  faultName Truncate{} = "truncate"
+  faultName Dribble{} = "dribble"
+  faultName Delay{} = "delay"
+  faultName Abort{} = "abort"
 
 readPolicy :: FilePath -> IO Policy
 readPolicy path = L.readFile path >>= either fail pure . eitherDecode

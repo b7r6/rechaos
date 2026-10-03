@@ -7,17 +7,36 @@
 -- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {-# LANGUAGE OverloadedStrings #-}
 
-module Rechaos.Shell.Oracle (snapshot, oracleJSON, verdictJSON, putVerdict, compareTrees) where
+{- | The differential oracle's shell: hash an output directory into a 'Tree' and
+compare two such trees to decide whether a chaos build diverged from a clean one.
+
+This module is in the IO shell. It walks the filesystem and computes digests
+here, then hands the resulting pure 'Tree's to "Rechaos.Core.Oracle" for the
+comparison. By convention human-facing chatter goes to stderr while the
+scriptable JSON verdict is written to stdout.
+-}
+module Rechaos.Shell.Oracle (
+  -- * Filesystem snapshot
+  snapshot,
+
+  -- * Comparison
+  compareTrees,
+
+  -- * JSON rendering
+  oracleJSON,
+  verdictJSON,
+  putVerdict,
+) where
 
 import Control.Exception (evaluate)
 import Control.Monad (forM, unless)
 import Data.Aeson (Value, encode, object, (.=))
 import Data.Bits ((.&.))
-import qualified Data.ByteString.Lazy as L
-import qualified Data.ByteString.Lazy.Char8 as LC
+import Data.ByteString.Lazy qualified as L
+import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.List (sort)
-import qualified Data.Map.Strict as M
-import qualified Data.Text as T
+import Data.Map.Strict qualified as M
+import Data.Text qualified as T
 import Rechaos.Core.Oracle
 import Rechaos.Shell.Protocol (sha256)
 import System.Directory (listDirectory)
@@ -25,6 +44,10 @@ import System.FilePath ((</>))
 import System.IO (IOMode (ReadMode), withBinaryFile)
 import System.Posix.Files
 
+{- | Walk an output directory and hash it into a pure 'Tree', recording each
+regular file's digest, size, and executable bit, following no symlinks and
+failing if any node changes while it is being read.
+-}
 snapshot :: FilePath -> IO Tree
 snapshot root = do
   status <- getSymbolicLinkStatus root
@@ -77,6 +100,9 @@ verdictJSON label = object ["verdict" .= label]
 putVerdict :: T.Text -> IO ()
 putVerdict = LC.putStrLn . encode . verdictJSON
 
+{- | Render an oracle 'Verdict' as a JSON object, listing per-path clean\/chaos
+changes when the two trees diverged.
+-}
 oracleJSON :: Verdict -> Value
 oracleJSON Equivalent = object ["verdict" .= ("equivalent" :: T.Text)]
 oracleJSON Inconclusive = object ["verdict" .= ("inconclusive" :: T.Text)]
@@ -88,5 +114,8 @@ oracleJSON (Diverged changes) =
            ]
     ]
 
+{- | Snapshot two output directories and compare them, yielding the oracle
+'Verdict' for whether the second (chaos) build diverged from the first (clean).
+-}
 compareTrees :: FilePath -> FilePath -> IO Verdict
 compareTrees a b = compareBuilds <$> (Built <$> snapshot a) <*> (Built <$> snapshot b)

@@ -186,42 +186,80 @@ matrix).
 
 ## Method x direction x fault compatibility
 
-Validity is enforced twice from the same rule: once on the whole policy at
-decode time, and again per decision when a recorded timeline is replayed.
+Validity is enforced twice from the same rule, both by `validFault`: once on the
+whole policy at decode time (via `validatePolicy`), and again per decision when a
+recorded timeline is replayed. `validFault` is the single source of truth; this
+section states it exactly.
 
-The authoritative set of **supported methods** in the current decoder is:
+### Supported methods
 
-- `build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs`
+A target's `method` must name one of the methods in the `supportedMethods`
+allow-list. A target naming any other method is rejected with `policy targets an
+unsupported method`; all other REAPI methods pass through untouched. The current
+allow-list is:
+
 - `google.bytestream.ByteStream/Read`
 - `google.bytestream.ByteStream/Write`
+- `build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs`
+- `build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs`
+- `build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs`
+- `build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree`
+- `build.bazel.remote.execution.v2.ActionCache/GetActionResult`
+- `build.bazel.remote.execution.v2.ActionCache/UpdateActionResult`
+- `build.bazel.remote.execution.v2.Capabilities/GetCapabilities`
 
-A target naming any other method is rejected. All other REAPI methods pass
-through untouched.
+### Fault eligibility
 
-**Delay and Abort** are the message-agnostic faults: they apply to any supported
-method and either direction, because they do not inspect or rewrite payload
-bytes. This is the dimension the fault-coverage work widens — the intent is to
-enlarge the supported-method allow-list so Delay/Abort cover the broader REAPI
-surface (Execution, ActionCache, Capabilities, and the remaining CAS methods),
-with the list in `validFault` as the single source of truth. Consult that list
-for the exact set your build of rechaos accepts.
+`validFault` enforces exactly one restriction, and it applies to `Truncate` only:
 
-**Truncate and Dribble** rewrite payload bytes and are therefore restricted to
-the two ByteStream payload directions:
+- **Delay, Abort, and Dribble** are legal on **every** supported method and
+  **either** direction. Delay and Abort are message-agnostic. Dribble paces
+  payload delivery: on a streaming payload direction it re-chunks the bytes; on a
+  unary message it paces the whole message as a single chunk. Nothing in
+  `validFault` restricts these beyond the supported-method check above.
+- **Truncate** shortens a payload, which only makes sense mid-stream, so
+  `validFault` rejects it anywhere outside the two ByteStream payload directions
+  (`truncate requires Read response or Write request`):
+  - ByteStream `Read` with `direction: "response"`
+  - ByteStream `Write` with `direction: "request"`
 
-- ByteStream `Read` with `direction: "response"`
-- ByteStream `Write` with `direction: "request"`
+### Eligibility matrix
 
-| Fault | FindMissingBlobs | ByteStream Read (response) | ByteStream Read (request) | ByteStream Write (request) | ByteStream Write (response) |
+Columns are the four faults crossed with each supported method's two directions.
+A cell is **legal** (the combination is eligible and takes effect) or **rejected**
+(`validFault` fails the policy / replay line).
+
+| Method | Direction | Delay | Abort | Dribble | Truncate |
 |---|---|---|---|---|---|
-| `delay` | yes | yes | yes | yes | yes |
-| `abort` | yes | yes | yes | yes | yes |
-| `dribble` | no | yes | no | yes | no |
-| `truncate` | no | yes | no | yes | no |
+| `ByteStream/Read` | request | legal | legal | legal | rejected |
+| `ByteStream/Read` | response | legal | legal | legal | legal |
+| `ByteStream/Write` | request | legal | legal | legal | legal |
+| `ByteStream/Write` | response | legal | legal | legal | rejected |
+| `ContentAddressableStorage/FindMissingBlobs` | request / response | legal | legal | legal | rejected |
+| `ContentAddressableStorage/BatchUpdateBlobs` | request / response | legal | legal | legal | rejected |
+| `ContentAddressableStorage/BatchReadBlobs` | request / response | legal | legal | legal | rejected |
+| `ContentAddressableStorage/GetTree` | request / response | legal | legal | legal | rejected |
+| `ActionCache/GetActionResult` | request / response | legal | legal | legal | rejected |
+| `ActionCache/UpdateActionResult` | request / response | legal | legal | legal | rejected |
+| `Capabilities/GetCapabilities` | request / response | legal | legal | legal | rejected |
+| *any method not in the allow-list* | request / response | rejected | rejected | rejected | rejected |
 
-(Delay/Abort columns are `yes` for every supported method and direction; the
-table shows the ByteStream directions explicitly to contrast with the
-payload-rewriting faults.)
+Reading the matrix:
+
+- **Truncate** is `rejected` by `validFault` on everything except ByteStream Read
+  response and ByteStream Write request — it is the only fault with an explicit
+  per-direction rejection rule.
+- **Dribble** paces payload delivery: it re-chunks a streamed payload on the two
+  ByteStream payload directions, and paces any other (unary) message as a single
+  whole-message chunk — so it is `legal` on every method in the allow-list.
+- **Delay/Abort** are `legal` for every row in the allow-list because they are
+  message-agnostic; the bottom row shows that *any* fault on an unsupported
+  method is `rejected` before the gateway starts.
+
+The decoder echoes the offending method/field in its errors: an unsupported
+method fails with `policy targets an unsupported method`, and an out-of-place
+`truncate` fails with `truncate requires Read response or Write request`, so a
+rejected cell names exactly why it was rejected.
 
 ## Selection scope
 

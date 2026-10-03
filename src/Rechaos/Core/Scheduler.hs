@@ -33,9 +33,9 @@ module Rechaos.Core.Scheduler (
 
 import Data.Bits (shiftR, xor)
 import Data.List (mapAccumL)
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Word (Word64)
 import Numeric.Natural (Natural)
 import Rechaos.Core.Types

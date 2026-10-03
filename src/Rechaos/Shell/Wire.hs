@@ -13,16 +13,36 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Rechaos.Shell.Wire where
+{- | The grapesy transport glue: a single opaque 'Wire' RPC type, indexed by
+service and method type-level strings, whose payloads are raw lazy
+'Data.ByteString.Lazy.ByteString's forwarded byte-for-byte.
 
-import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as L
+This module is in the IO shell. It supplies the grapesy @IsRPC@,
+@SupportsClientRpc@, and @SupportsServerRpc@ instances that let the proxy relay
+any method without a compiled schema; unknown protobuf fields pass through
+untouched, and only targeted messages are decoded elsewhere for blob sizes and
+valid ByteStream edits.
+-}
+module Rechaos.Shell.Wire (
+  -- * Schema-free RPC type
+  Wire,
+
+  -- * Named RPC aliases
+  ReadRPC,
+  WriteRPC,
+  MissingRPC,
+) where
+
+import Data.ByteString.Char8 qualified as B
+import Data.ByteString.Lazy qualified as L
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Network.GRPC.Common
 
--- Forward unknown protobuf fields byte-for-byte. Decode only targeted messages
--- for blob sizes and valid ByteStream edits, using generated proto-lens types.
+{- | A schema-free gRPC method, indexed by @service@ and @method@ type-level
+strings; its request and response bodies are raw bytes forwarded verbatim.
+-}
 data Wire (service :: Symbol) (method :: Symbol)
+
 type instance Input (Wire s m) = L.ByteString
 type instance Output (Wire s m) = L.ByteString
 type instance RequestMetadata (Wire s m) = [CustomMetadata]
@@ -40,7 +60,12 @@ instance (KnownSymbol s, KnownSymbol m) => SupportsServerRpc (Wire s m) where
   rpcDeserializeInput _ = Right
   rpcSerializeOutput _ = id
 
+-- | The ByteStream @Read@ method.
 type ReadRPC = Wire "google.bytestream.ByteStream" "Read"
+
+-- | The ByteStream @Write@ method.
 type WriteRPC = Wire "google.bytestream.ByteStream" "Write"
+
+-- | The REAPI @FindMissingBlobs@ method.
 type MissingRPC =
   Wire "build.bazel.remote.execution.v2.ContentAddressableStorage" "FindMissingBlobs"

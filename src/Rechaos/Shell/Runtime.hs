@@ -7,16 +7,40 @@
 -- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {-# LANGUAGE OverloadedStrings #-}
 
-module Rechaos.Shell.Runtime (Runtime, newRuntime, beginCall, decide, logOutcome, remainingReplay, sleepMicros) where
+{- | The mutable per-process state that backs the proxy: the active policy (or
+replay timeline), monotonic-clock observation, per-method occurrence counters,
+and the decision and outcome journals.
+
+This module is in the IO shell. It reads the clock, allocates occurrence
+indices, and writes journal lines; the actual scheduling and replay choices are
+made by the pure core, which this module merely feeds observed 'Event's and
+records the resulting 'Decision's.
+-}
+module Rechaos.Shell.Runtime (
+  -- * Runtime handle
+  Runtime,
+  newRuntime,
+
+  -- * Per-call lifecycle
+  beginCall,
+  decide,
+  logOutcome,
+
+  -- * Replay accounting
+  remainingReplay,
+
+  -- * Interruptible sleep
+  sleepMicros,
+) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Data.Aeson (encode, object, (.=))
-import qualified Data.ByteString.Lazy.Char8 as L
-import qualified Data.Map.Strict as M
-import qualified Data.Set as S
+import Data.ByteString.Lazy.Char8 qualified as L
+import Data.Map.Strict qualified as M
+import Data.Set qualified as S
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Numeric.Natural (Natural)
@@ -27,6 +51,10 @@ import Rechaos.Shell.Protocol (messageSize, sha256)
 import System.IO
 
 data RuntimeState = RuntimeState Word64 (M.Map Text Natural) (S.Set EventKey)
+
+{- | Opaque proxy state: policy, optional replay table, mutable counters, and the
+decision and outcome journal handles. Construct one with 'newRuntime'.
+-}
 data Runtime
   = Runtime
       Policy
@@ -35,6 +63,9 @@ data Runtime
       Handle
       Handle
 
+{- | Build a 'Runtime' from a policy and optional replay timeline, validating the
+replay table and setting both journal handles to line buffering.
+-}
 newRuntime :: Policy -> Maybe (Bool, Timeline) -> Handle -> Handle -> IO Runtime
 newRuntime p replay journal outcomes = do
   table <- traverse (\(s, ds) -> either (fail . T.unpack) (pure . (,) s) (validateTimeline ds)) replay
@@ -43,6 +74,9 @@ newRuntime p replay journal outcomes = do
   hSetBuffering outcomes LineBuffering
   pure (Runtime p table state journal outcomes)
 
+{- | Open a new call for @method@: allocate its 1-based occurrence index and take
+the monotonic start time the call's events will be measured against.
+-}
 beginCall :: Runtime -> Text -> IO (Natural, Word64)
 beginCall (Runtime _ _ state _ _) method = do
   n <- modifyMVar state $ \(RuntimeState s calls seen) -> do
@@ -51,6 +85,9 @@ beginCall (Runtime _ _ state _ _) method = do
   now <- getMonotonicTimeNSec
   pure (n, now)
 
+{- | Observe one message as an 'Event', consult the policy (or replay table) for
+the fault to inject, journal the 'Decision' before any effect, and return it.
+-}
 decide ::
   Runtime ->
   Text ->
@@ -85,6 +122,9 @@ decide (Runtime p replay state journal _) method occurrence started direction in
         hFlush journal -- record the decision BEFORE the effect
         pure (RuntimeState s' calls (S.insert (eventKey e) seen), Right (injection decision))
 
+{- | Append a one-line outcome record for a finished call -- its method,
+occurrence, result label, and elapsed microseconds -- to the outcome journal.
+-}
 logOutcome :: Runtime -> Text -> Natural -> Word64 -> Text -> IO ()
 logOutcome (Runtime _ _ state _ out) method occurrence started result = do
   now <- getMonotonicTimeNSec
@@ -101,11 +141,16 @@ logOutcome (Runtime _ _ state _ out) method occurrence started result = do
           )
       )
 
+{- | List replay events that were expected but never observed; empty when not
+replaying or when every scheduled event was seen.
+-}
 remainingReplay :: Runtime -> IO [EventKey]
 remainingReplay (Runtime _ replay state _ _) = withMVar state $ \(RuntimeState _ _ seen) ->
   pure (case replay of Nothing -> []; Just (_, table) -> S.toList (M.keysSet table S.\\ seen))
 
--- Avoid Int overflow and remain interruptible even for very long policies.
+{- | Sleep for the given number of microseconds in bounded chunks, avoiding 'Int'
+overflow and staying interruptible even for very long delays.
+-}
 sleepMicros :: Natural -> IO ()
 sleepMicros 0 = pure ()
 sleepMicros n = do

@@ -20,17 +20,17 @@ module Rechaos.Shell.Protocol (
 
 import Control.Lens ((&), (.~), (^.))
 import Crypto.Hash (Digest, SHA256, hashlazy)
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as L
+import Data.ByteString qualified as B
+import Data.ByteString.Lazy qualified as L
 import Data.Int (Int64)
 import Data.ProtoLens (Message, decodeMessage, encodeMessage)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Numeric.Natural (Natural)
-import qualified Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution as RE
-import qualified Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution_Fields as R
-import qualified Proto.Google.Bytestream.Bytestream as BS
-import qualified Proto.Google.Bytestream.Bytestream_Fields as F
+import Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution qualified as RE
+import Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution_Fields qualified as R
+import Proto.Google.Bytestream.Bytestream qualified as BS
+import Proto.Google.Bytestream.Bytestream_Fields qualified as F
 import Rechaos.Core.Types
 import Text.Read (readMaybe)
 
@@ -40,6 +40,11 @@ writeMethod = "google.bytestream.ByteStream/Write"
 missingMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
 batchReadMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs"
 batchUpdateMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs"
+
+getTreeMethod, getActionResultMethod, updateActionResultMethod :: Text
+getTreeMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree"
+getActionResultMethod = "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
+updateActionResultMethod = "build.bazel.remote.execution.v2.ActionCache/UpdateActionResult"
 
 decode :: (Message a) => L.ByteString -> Either String a
 decode = decodeMessage . L.toStrict
@@ -78,10 +83,43 @@ blobSize method bytes
         (const Nothing)
         (sumSizes . map (^. R.digest . R.sizeBytes) . (^. R.requests))
         (decode bytes :: Either String RE.BatchUpdateBlobsRequest)
+  | method == getActionResultMethod =
+      -- Request carries the action digest; response (ActionResult) carries the
+      -- cached output digests. blobSize is direction-agnostic here, so try the
+      -- request first and fall back to the response.
+      case getActionResultRequestSize bytes of
+        Just n -> Just n
+        Nothing -> actionResultSizes bytes
+  | method == updateActionResultMethod =
+      -- The ActionResult appears in both the request and the response; decode it
+      -- directly as the response shape, which the request also embeds.
+      actionResultSizes bytes
+  | method == getTreeMethod =
+      either
+        (const Nothing)
+        (sumSizes . concatMap directorySizes . (^. R.directories))
+        (decode bytes :: Either String RE.GetTreeResponse)
   | otherwise = Nothing
  where
   sizes req = sumSizes (map (^. R.sizeBytes) (req ^. R.blobDigests))
   sumSizes ns = if all (>= 0) ns then Just (sum (map fromIntegral ns)) else Nothing
+  getActionResultRequestSize bs =
+    either
+      (const Nothing)
+      (\req -> sumSizes [req ^. R.actionDigest . R.sizeBytes])
+      (decode bs :: Either String RE.GetActionResultRequest)
+  actionResultSizes bs =
+    either
+      (const Nothing)
+      (sumSizes . actionResultDigestSizes)
+      (decode bs :: Either String RE.ActionResult)
+  actionResultDigestSizes r =
+    map (^. R.digest . R.sizeBytes) (r ^. R.outputFiles)
+      ++ maybe [] (\d -> [d ^. R.sizeBytes]) (r ^. R.maybe'stdoutDigest)
+      ++ maybe [] (\d -> [d ^. R.sizeBytes]) (r ^. R.maybe'stderrDigest)
+  directorySizes dir =
+    map (^. R.digest . R.sizeBytes) (dir ^. R.files)
+      ++ map (^. R.digest . R.sizeBytes) (dir ^. R.directories)
 
 messageSize :: Text -> Direction -> L.ByteString -> Natural
 messageSize method direction bytes

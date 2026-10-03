@@ -7,22 +7,25 @@
 -- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Main (main) where
 
 import Control.Monad (unless)
 import Data.Aeson (decode, eitherDecode, encode)
-import qualified Data.ByteString.Lazy as L
+import Data.ByteString.Lazy qualified as L
+import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.List (sort)
-import qualified Data.Map.Strict as M
-import qualified Data.Text as T
+import Data.Map.Strict qualified as M
+import Data.Text qualified as T
 import Data.Word (Word64)
 import Numeric.Natural (Natural)
-import qualified Rechaos.Core.Minimize as Min
-import qualified Rechaos.Core.Oracle as O
+import Rechaos.Core.Minimize qualified as Min
+import Rechaos.Core.Oracle qualified as O
 import Rechaos.Core.Scheduler
 import Rechaos.Core.Types
 import Rechaos.Shell.Json ()
+import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import Test.QuickCheck
 
@@ -34,6 +37,127 @@ eventAt :: Natural -> Event
 eventAt n = Event method n Response 1 (Just 100) 500 100 "abc"
 policy :: Word64 -> Policy
 policy s = Policy s [Rule targetAll 500000 (Delay 100)]
+
+-- | A Natural drawn from the nonnegative Int range, for JSON round-trip generators.
+natural :: Gen Natural
+natural = fromIntegral . getNonNegative <$> (arbitrary :: Gen (NonNegative Int))
+
+-- The full fault-eligible method surface, mirrored from Rechaos.Shell.Json's
+-- supportedMethods so generated Policies round-trip through validFault.
+supportedMethods :: [T.Text]
+supportedMethods =
+  [ "google.bytestream.ByteStream/Read"
+  , "google.bytestream.ByteStream/Write"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree"
+  , "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
+  , "build.bazel.remote.execution.v2.ActionCache/UpdateActionResult"
+  , "build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
+  ]
+
+-- | A stream-payload target (Read response or Write request) that Truncate accepts.
+streamPayloadTarget :: Gen (T.Text, Direction)
+streamPayloadTarget =
+  elements
+    [ ("google.bytestream.ByteStream/Read", Response)
+    , ("google.bytestream.ByteStream/Write", Request)
+    ]
+
+instance Arbitrary Direction where
+  arbitrary = elements [Request, Response]
+
+instance Arbitrary Status where
+  arbitrary = arbitraryBoundedEnum
+
+-- Only JSON-valid faults are generated so validPolicy/validFault accept the Rule.
+instance Arbitrary Fault where
+  arbitrary =
+    oneof
+      [ Delay <$> natural
+      , Abort <$> arbitrary
+      , Dribble
+          <$> (fromIntegral . getPositive <$> (arbitrary :: Gen (Positive Int)))
+          <*> (fromIntegral <$> chooseInt (1, 4194304))
+      , Truncate <$> natural
+      ]
+
+-- A fault paired with a target method/direction on which validFault accepts it.
+-- Truncate is only emitted against a stream-payload target.
+arbitraryFaultAndTarget :: Gen (Fault, T.Text, Direction)
+arbitraryFaultAndTarget =
+  oneof
+    [ do
+        f <- oneof [Delay <$> natural, Abort <$> arbitrary, dribbleGen]
+        m <- elements supportedMethods
+        d <- arbitrary
+        pure (f, m, d)
+    , do
+        keep <- natural
+        (m, d) <- streamPayloadTarget
+        pure (Truncate keep, m, d)
+    ]
+ where
+  dribbleGen =
+    Dribble
+      <$> (fromIntegral . getPositive <$> (arbitrary :: Gen (Positive Int)))
+      <*> (fromIntegral <$> chooseInt (1, 4194304))
+
+-- | A Target carrying the given method and direction with JSON-valid optional fields.
+arbitraryTargetFor :: T.Text -> Direction -> Gen Target
+arbitraryTargetFor m d = do
+  occ <- positiveMaybe
+  mi <- positiveMaybe
+  (lo, hi) <- orderedMaybe
+  (af, bf) <- orderedMaybe
+  pure (Target m d occ mi lo hi af bf)
+ where
+  positiveMaybe =
+    oneof [pure Nothing, Just . fromIntegral . getPositive <$> (arbitrary :: Gen (Positive Int))]
+  orderedMaybe =
+    oneof
+      [ pure (Nothing, Nothing)
+      , do a <- natural; pure (Just a, Nothing)
+      , do b <- natural; pure (Nothing, Just b)
+      , do a <- natural; c <- natural; pure (Just (min a c), Just (max a c))
+      ]
+
+instance Arbitrary Target where
+  arbitrary = do
+    m <- elements supportedMethods
+    d <- arbitrary
+    arbitraryTargetFor m d
+
+-- A rule whose fault and target are jointly generated to satisfy validFault.
+instance Arbitrary Rule where
+  arbitrary = do
+    (f, m, d) <- arbitraryFaultAndTarget
+    t <- arbitraryTargetFor m d
+    ppm <- fromIntegral <$> chooseInt (0, 1000000)
+    pure (Rule t ppm f)
+
+instance Arbitrary Policy where
+  arbitrary = Policy <$> (fromIntegral <$> chooseInt (0, maxBound)) <*> listOf arbitrary
+
+-- Oracle entries exercising all three constructors, with varying size and exec bit.
+instance Arbitrary O.Entry where
+  arbitrary =
+    oneof
+      [ O.File
+          <$> (T.pack . show <$> chooseInt (0, 4))
+          <*> natural
+          <*> arbitrary
+      , pure O.Directory
+      , O.Symlink . T.pack . show <$> chooseInt (0, 4)
+      ]
+
+-- | A build-output tree over a small key space, exercising every 'O.Entry' kind.
+richTree :: Gen O.Tree
+richTree = do
+  keys <- sublistOf (map (T.pack . show) [0 .. 5 :: Int])
+  entries <- vectorOf (length keys) arbitrary
+  pure (M.fromList (zip keys entries))
 
 check :: (Testable p) => String -> p -> IO ()
 check name prop = do
@@ -247,7 +371,90 @@ main = do
   check "oracle equivalence is transitive" $ \(ns :: [Int]) (ms :: [Int]) (ks :: [Int]) ->
     let a = tree ns; b = tree ms; c = tree ks
      in not (O.equivalent a b && O.equivalent b c) || O.equivalent a c
+  -- (G) seed-advance invariant ------------------------------------------------
+  check "folding step advances the seed exactly once per event, whatever matched" $ \s (NonNegative count) ->
+    let n = count `mod` 100 :: Int
+        es = map (eventAt . fromIntegral) [1 .. n]
+        advance (seed0, ds) e = let (seed1, d) = step (rules (policy s)) seed0 e in (seed1, ds ++ [d])
+        (final, _) = foldl advance (s, []) es
+     in final == iterate (fst . nextSeed) s !! n
+  check "a nonmatching or absent rule advances the seed identically to a match" $ \s ->
+    fst (step [] s (eventAt 1)) == fst (nextSeed s)
+      && fst (step [Rule targetAll{tMethod = "nomatch"} 1000000 (Delay 1)] s (eventAt 1))
+        == fst (nextSeed s)
+  -- (H) full policy JSON round trip -------------------------------------------
+  check "a fully valid policy round trips through JSON" $ \(p :: Policy) ->
+    decode (encode p) == Just p
+  check "a single-rule policy exercising every fault path round trips through JSON" $ \(r :: Rule) ->
+    let p = Policy 42 [r]
+     in decode (encode p) == Just p
+  -- (I) abort coverage --------------------------------------------------------
+  check "an abort-only timeline yields only deletions, never a weaker fault" $ \(Positive k) ->
+    let ds = [Decision (eventAt (fromIntegral (n :: Int))) (Just (Abort Internal)) | n <- [1 .. k]]
+     in all ((< length ds) . length) (Min.candidates (Min.best (Min.start ds)))
+  check "an abort rule round trips through JSON for every status" $
+    all
+      (\st -> let p = Policy 0 [Rule targetAll 1000 (Abort st)] in decode (encode p) == Just p)
+      [minBound .. maxBound]
+  -- (J) richer oracle algebra -------------------------------------------------
+  check "oracle equivalence is reflexive and symmetric over all entry kinds" $
+    forAll richTree $ \a -> forAll richTree $ \b ->
+      O.equivalent a a && O.equivalent a b == O.equivalent b a
+  check "compareBuilds reports Diverged with the underlying changes over all entry kinds" $
+    forAll richTree $ \a -> forAll richTree $ \b ->
+      case O.compareBuilds (O.Built a) (O.Built b) of
+        O.Diverged changes -> changes == O.diff a b && not (null changes)
+        O.Equivalent -> O.diff a b == []
+        O.Inconclusive -> False
+  check "oracle equivalence is transitive over all entry kinds" $
+    forAll richTree $ \a -> forAll richTree $ \b -> forAll richTree $ \c ->
+      not (O.equivalent a b && O.equivalent b c) || O.equivalent a c
+  check "an exec-bit-only change is reported as a change" $
+    O.diff
+      (M.singleton "a" (O.File "h" 1 False))
+      (M.singleton "a" (O.File "h" 1 True))
+      == [O.Change "a" (Just (O.File "h" 1 False)) (Just (O.File "h" 1 True))]
+  check "a symlink-target-only change is reported as a change" $
+    O.diff
+      (M.singleton "a" (O.Symlink "x"))
+      (M.singleton "a" (O.Symlink "y"))
+      == [O.Change "a" (Just (O.Symlink "x")) (Just (O.Symlink "y"))]
+  -- (K) replay mismatch and dribble minimality --------------------------------
+  check "replay fails when the observed event carries a different injected fault" $
+    let ds = [Decision (eventAt 1) (Just (Delay 1))]
+        observed = [Decision (eventAt 1) (Just (Delay 2))]
+     in not (isRight (verifyReplay ds observed))
+  check "dribble micros are ceiling-minimal: one microsecond less under-delivers" $ \(Positive r) (Positive b) ->
+    let rate = fromIntegral (r :: Int); bytes = fromIntegral (b :: Int)
+     in maybe False (\us -> us == 0 || (us - 1) * rate < bytes * 1000000) (dribbleMicros rate bytes)
+  -- (L) golden snapshots ------------------------------------------------------
+  goldenSnapshots
  where
+  goldenSnapshots :: IO ()
+  goldenSnapshots = do
+    regen <- lookupEnv "RECHAOS_REGEN_GOLDEN"
+    let scheduleBytes = LC.unlines (map encode (schedule (policy 1) (map eventAt [1 .. 5])))
+        faultBytes = encode goldenFaultRules
+    case regen of
+      Just _ -> do
+        L.writeFile "test/golden/schedule.jsonl" scheduleBytes
+        L.writeFile "test/golden/faults.json" faultBytes
+        putStrLn "golden snapshots regenerated"
+      Nothing -> do
+        putStrLn "golden schedule snapshot matches committed bytes"
+        onDiskSchedule <- L.readFile "test/golden/schedule.jsonl"
+        unless (onDiskSchedule == scheduleBytes) exitFailure
+        putStrLn "golden faults snapshot matches committed bytes"
+        onDiskFaults <- L.readFile "test/golden/faults.json"
+        unless (onDiskFaults == faultBytes) exitFailure
+  -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
+  goldenFaultRules :: [Rule]
+  goldenFaultRules =
+    [ Rule targetAll 500000 (Delay 100)
+    , Rule targetAll 250000 (Abort Internal)
+    , Rule targetAll 100000 (Dribble 1024 16)
+    , Rule targetAll 750000 (Truncate 64)
+    ]
   isRight (Right _) = True
   isRight _ = False
   tree ns =

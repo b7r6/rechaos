@@ -76,9 +76,10 @@ timeline and `.outcomes.jsonl` on-disk schema.
 | `{"kind":"dribble","bytesPerSecond":65536,"chunkBytes":4096}` | Pace ByteStream payload chunks while preserving valid protobuf messages and Write offsets. |
 | `{"kind":"truncate","keepBytes":7}` | Keep N bytes of a Read response and end the stream with `OK`, or shorten a Write message and `finish_write`. |
 
-Payload-rewriting faults (`truncate`, `dribble`) apply only to ByteStream `Read`
-responses and `Write` requests. The message-agnostic faults (`delay`, `abort`)
-apply to every supported method and direction; the supported-method allow-list in
+`truncate` applies only to ByteStream `Read` responses and `Write` requests
+(shortening a unary message would produce an invalid proto). `dribble`, `delay`,
+and `abort` apply to every supported method and direction — `dribble` paces a
+unary message as a single whole-message chunk. the supported-method allow-list in
 `validFault` is widening beyond `FindMissingBlobs`/`Read`/`Write` to cover the
 broader REAPI surface, so consult [`docs/fault-dsl.md`](docs/fault-dsl.md) for the
 exact set your build accepts. Methods outside the allow-list pass through. Targets
@@ -141,7 +142,8 @@ nix develop --command python3 scripts/chaos-monkey.py --only-direct --stop-on-fi
 nix develop --command python3 scripts/chaos-monkey.py --execution   # + scheduler stress
 ```
 
-Invariants include: an `OK` Read must return bytes matching the requested digest;
+The invariants are catalogued, with their REAPI basis and check sites, in
+[`docs/invariants.md`](docs/invariants.md). In brief: an `OK` Read must return bytes matching the requested digest;
 a partial/aborted upload must not become a readable blob whose content mismatches
 its digest; a successful Write's `committed_size` must equal the advertised size;
 `FindMissingBlobs` must be consistent; `QueryWriteStatus` must not over-report;
@@ -152,7 +154,9 @@ stresses the Execution/scheduler path and detects awaited-action queue-GC leaks
 ## Architecture
 
 The core imports no `IO`, clock, filesystem, gRPC, or random-generator API, and
-contains no partial indexing, `error`, or `undefined`.
+contains no partial indexing, `error`, or `undefined`. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design rationale
+behind the pure-core / IO-shell split, the determinism model, and replay.
 
 | Module | Responsibility |
 |---|---|
@@ -173,7 +177,7 @@ contains no partial indexing, `error`, or `undefined`.
 | `scripts/` | `chaos-monkey.py`, build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
 | `reports/` | Dated investigation write-ups and their captured evidence under `reports/evidence/` |
 | `proto/` | Vendored `remote-apis` and `googleapis` protocol definitions with their licenses |
-| `docs/` | Reference docs: [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL) and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
+| `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
 
 ## Develop
 

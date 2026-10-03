@@ -117,6 +117,10 @@ produces it for post-run analysis and does not read it back for replay.
 
 ## Replay and verification
 
+For the design rationale behind these semantics — why replay distinguishes an
+incomplete recording from a changed one, and how the fingerprint is defined — see
+the [replay section of ARCHITECTURE.md](ARCHITECTURE.md#replay-incomplete-vs-changed).
+
 - `rechaos serve --replay TIMELINE` replays the decisions from a recorded
   timeline. A full replay fails closed on any event missing from the timeline
   (`event missing from replay timeline`) or whose fingerprint changed
@@ -128,6 +132,31 @@ produces it for post-run analysis and does not read it back for replay.
 - `rechaos schedule --policy P --trace T --output O` recomputes the timeline
   deterministically from a recorded event trace, reading the `event` field of
   each line and writing a fresh decision timeline.
+
+### Incomplete vs. changed
+
+Replay separates two distinct failure modes, and the distinction is deliberate:
+
+- **Incomplete** — a required event never occurred. A full replay fails with
+  `event missing from replay timeline`; `verifyReplay` folds this into `replay
+  incomplete or changed: <identity>`. A replay is **not** complete merely because
+  nothing it observed mismatched: every expected event must also have happened.
+- **Changed** — an event occurred, but its fingerprint differs from the
+  recording. A full replay fails with `replay fingerprint mismatch`;
+  `verify-replay` reports `replay incomplete or changed: <identity>`.
+
+### The `sameEvent` fingerprint
+
+Two events are "the same event" when they agree on every field **except**
+`elapsedMicros`. `elapsedMicros` is the arrival time relative to the start of the
+call and may legitimately differ between a recording and a live replay, so it is
+excluded from the fingerprint. Every other field — the identity tuple
+`(method, occurrence, direction, messageIndex)`, `blobBytes`, `messageBytes`, and
+`payloadHash` — must match exactly, or the event counts as *changed*. The
+identity tuple alone is used to *locate* the recorded event; the remaining
+non-timing fields are what the fingerprint compares once located. A fingerprint
+with a differing `payloadHash` or `messageBytes` means the traffic itself changed,
+which is reported rather than silently replayed.
 
 ## Stability and versioning policy
 

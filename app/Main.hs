@@ -13,14 +13,16 @@ import Control.Concurrent (threadDelay)
 import Control.Exception
 import Control.Monad (unless, when)
 import Data.Aeson (encode)
-import qualified Data.ByteString.Lazy.Char8 as L
+import Data.ByteString.Lazy.Char8 qualified as L
 import Data.Maybe (isJust, isNothing)
-import qualified Data.Text as T
-import qualified Network.GRPC.Client as C
+import Data.Text qualified as T
+import Data.Version (showVersion)
+import Network.GRPC.Client qualified as C
 import Network.GRPC.Common (SslKeyLog (..), def)
 import Network.GRPC.Server.Run
 import Options.Applicative
-import qualified Rechaos.Core.Oracle as O
+import Paths_rechaos (version)
+import Rechaos.Core.Oracle qualified as O
 import Rechaos.Core.Scheduler (schedule, verifyReplay)
 import Rechaos.Core.Types
 import Rechaos.Shell.Json
@@ -57,13 +59,17 @@ data Command
   | Minimize FilePath FilePath String String Int Int Int
   | VerifyReplay FilePath FilePath
 
--- Keep this literal in sync with the version in flake.nix / the cabal metadata.
--- It is hardcoded here deliberately to avoid reading flake.nix at build time.
+-- Built from the cabal 'version:' field via the autogen Paths_rechaos module so
+-- it can never drift from the package metadata.
 versionString :: String
-versionString = "rechaos 0.1.0"
+versionString = "rechaos " <> showVersion version
 
-optionString :: String -> String -> Parser String
-optionString name helpText = strOption (long name <> metavar "VALUE" <> help helpText)
+optionString :: String -> String -> String -> Parser String
+optionString name metavarName helpText =
+  strOption (long name <> metavar metavarName <> help helpText)
+
+optionFile :: String -> String -> Parser String
+optionFile name = optionString name "FILE"
 
 commandParser :: Parser Command
 commandParser =
@@ -72,8 +78,8 @@ commandParser =
         "serve"
         (Serve <$> serveOptions)
         ( "Run the REAPI chaos gateway. "
-            <> "Banners go to stderr. "
-            <> "Exit codes: 0 ok, 2 usage/IO error."
+            <> "Runs until interrupted; banners go to stderr. "
+            <> "Exits non-zero only on startup, validation, or IO failure (exit code 2)."
         )
         <> command'
           "oracle"
@@ -85,11 +91,12 @@ commandParser =
         <> command'
           "schedule"
           ( Schedule
-              <$> optionString "policy" "Policy JSON"
-              <*> optionString "trace" "Recorded JSONL events"
-              <*> optionString "output" "Recomputed timeline JSONL"
+              <$> optionFile "policy" "Policy JSON"
+              <*> optionFile "trace" "Recorded JSONL events"
+              <*> optionFile "output" "Recomputed timeline JSONL"
           )
-          ( "Recompute decisions from a recorded event trace. "
+          ( "Recompute decisions from a recorded event trace and write the timeline. "
+              <> "stderr: chatter; stdout: empty. "
               <> "Exit codes: 0 ok, 2 usage/IO error."
           )
         <> command'
@@ -112,10 +119,10 @@ commandParser =
         <> command'
           "minimize"
           ( Minimize
-              <$> optionString "timeline" "Recorded fault timeline"
-              <*> optionString "output" "Minimized JSONL timeline"
-              <*> optionString "check" "Shell command that reads RECHAOS_TIMELINE and writes RECHAOS_VERDICT"
-              <*> optionString "signature" "Exact failure signature to preserve"
+              <$> optionFile "timeline" "Recorded fault timeline"
+              <*> optionFile "output" "Minimized JSONL timeline"
+              <*> optionString "check" "CMD" "Shell command that reads RECHAOS_TIMELINE and writes RECHAOS_VERDICT"
+              <*> optionString "signature" "SIG" "Exact failure signature to preserve"
               <*> option auto (long "repetitions" <> metavar "N" <> value 2 <> showDefault)
               <*> option auto (long "trial-timeout" <> metavar "SECONDS" <> value 30 <> showDefault)
               <*> option auto (long "max-trials" <> metavar "N" <> value 1000 <> showDefault)
@@ -145,7 +152,7 @@ serveOptions =
           <> showDefault
           <> help "Downstream listen port"
       )
-    <*> optionString "upstream-host" "Upstream REAPI hostname"
+    <*> optionString "upstream-host" "HOST" "Upstream REAPI hostname"
     <*> option
       auto
       ( long "upstream-port"
@@ -155,12 +162,18 @@ serveOptions =
           <> help "Upstream REAPI port"
       )
     <*> switch (long "upstream-tls" <> help "Verify upstream TLS using system trust or --ca")
-    <*> optional (optionString "ca" "Upstream CA PEM file")
-    <*> optional (optionString "certificate" "Downstream TLS certificate PEM")
-    <*> optional (optionString "key" "Downstream TLS key PEM")
-    <*> optional (optionString "policy" "Fault policy JSON (default: no faults)")
-    <*> optional (optionString "replay" "Replay a recorded JSONL timeline")
-    <*> switch (long "sparse" <> help "Replay only listed events; check fingerprints for all listed events")
+    <*> optional (optionFile "ca" "Upstream CA PEM file")
+    <*> optional (optionFile "certificate" "Downstream TLS certificate PEM")
+    <*> optional (optionFile "key" "Downstream TLS key PEM")
+    <*> optional (optionFile "policy" "Fault policy JSON (default: no faults)")
+    <*> optional (optionFile "replay" "Replay a recorded JSONL timeline")
+    <*> switch
+      ( long "sparse"
+          <> help
+            ( "Replay only the events listed in the --replay timeline, "
+                <> "checking fingerprints for each listed event; requires --replay."
+            )
+      )
     <*> strOption
       ( long "record"
           <> value "runs/timeline.jsonl"
@@ -217,6 +230,11 @@ withPath path act = act `catches` [Handler rioe, Handler rerr]
   rerr :: ErrorCall -> IO a
   rerr e = fail (path ++ ": " ++ show e)
 
+-- Append a consistent pointer to 'serve --help' onto a flag-combination usage
+-- error. The top-level handler still turns the result into exit code 2.
+serveHint :: String -> String
+serveHint msg = msg ++ " (see 'rechaos serve --help')"
+
 run :: Command -> IO ()
 run (Validate path) = do
   _ <- withPath path (readPolicy path)
@@ -234,6 +252,10 @@ run (Minimize input output checker signature repetitions seconds trials) =
   minimizeTimeline input output checker (T.pack signature) repetitions seconds trials
 run (Oracle clean chaos) = do
   result <- compareTrees clean chaos
+  hPutStrLn stderr $ case result of
+    O.Equivalent -> "trees equivalent"
+    O.Diverged _ -> "trees diverged"
+    O.Inconclusive -> "comparison inconclusive"
   L.putStrLn (encode (oracleJSON result))
   case result of
     O.Equivalent -> pure ()
@@ -242,15 +264,18 @@ run (Oracle clean chaos) = do
 run (Schedule policy trace output) = do
   p <- withPath ("policy " ++ policy) (readPolicy policy)
   ds <- withPath ("trace " ++ trace) (readTimeline trace)
-  writeTimeline output (schedule p (map event ds))
+  let decisions = schedule p (map event ds)
+  writeTimeline output decisions
+  hPutStrLn stderr ("scheduled " ++ show (length decisions) ++ " decisions -> " ++ output)
 run (Serve opts) = do
   unless (all (\n -> n > 0 && n <= 65535) [port opts, upstreamPort opts]) $
-    fail "ports must be in 1..65535"
+    fail (serveHint "ports must be in 1..65535")
   unless (maxSeconds opts > 0 && maxSeconds opts <= 86400) $
     fail "max-call-seconds must be in 1..86400"
-  when (sparse opts && isNothing (replayFile opts)) $ fail "--sparse requires --replay"
-  when (isJust (ca opts) && not (tlsUpstream opts)) $ fail "--ca requires --upstream-tls"
-  when (isJust (policyFile opts) && isJust (replayFile opts)) $ fail "choose --policy or --replay"
+  when (sparse opts && isNothing (replayFile opts)) $ fail (serveHint "--sparse requires --replay")
+  when (isJust (ca opts) && not (tlsUpstream opts)) $ fail (serveHint "--ca requires --upstream-tls")
+  when (isJust (policyFile opts) && isJust (replayFile opts)) $
+    fail (serveHint "choose --policy or --replay")
   p <- maybe (pure (Policy 0 [])) (\f -> withPath ("policy " ++ f) (readPolicy f)) (policyFile opts)
   replay <-
     traverse
@@ -271,7 +296,7 @@ run (Serve opts) = do
             Nothing
             (Just (SecureConfig (host opts) (fromIntegral (port opts)) cert [] privateKey SslKeyLogNone))
         )
-    _ -> fail "downstream TLS requires both --certificate and --key"
+    _ -> fail (serveHint "downstream TLS requires both --certificate and --key")
   let trust = maybe C.certStoreFromSystem C.certStoreFromPath (ca opts)
       address = C.Address (upstreamHost opts) (fromIntegral (upstreamPort opts)) Nothing
       server =

@@ -22,10 +22,20 @@ module Rechaos.Core.Types (
   Status (..),
   Fault (..),
 
+  -- * Status <-> gRPC code
+  statusCode,
+  statusFromCode,
+
   -- * Targeting and policy
   Target (..),
   Rule (..),
   Policy (..),
+
+  -- * Numeric invariants
+  maxPpm,
+  mkRule,
+  maxDribbleChunkBytes,
+  validFaultBounds,
 
   -- * Events and timelines
   Event (..),
@@ -33,11 +43,13 @@ module Rechaos.Core.Types (
   Timeline,
   EventKey,
   eventKey,
+  Fingerprint (..),
+  fingerprint,
   sameEvent,
 ) where
 
 import Data.Text (Text)
-import Data.Word (Word64)
+import Data.Word (Word64, Word8)
 import Numeric.Natural (Natural)
 
 -- Units are explicit and nonnegative. Validation at the shell boundary rejects
@@ -52,7 +64,25 @@ data Direction
   deriving (Eq, Ord, Show)
 
 {- | gRPC status codes that an 'Abort' fault can inject. The set is the subset of
-  the standard codes rechaos knows how to synthesize.
+  the standard codes rechaos knows how to synthesize. See 'statusCode' for the
+  canonical integer each constructor maps to.
+
+  The omitted standard codes are excluded deliberately:
+
+      * @OK@ (0) is excluded because 'Abort' must /fail/ the RPC; injecting a
+        success would be a no-op fault.
+      * @Unknown@ (2) is excluded because it carries no actionable meaning for a
+        chaos injection; its absence keeps every injected status specific.
+      * @AlreadyExists@ (6) and @OutOfRange@ (11) are excluded as
+        resource\/argument conditions that rechaos never synthesizes, overlapping
+        'InvalidArgument' and 'FailedPrecondition' for injection purposes.
+      * @PermissionDenied@ (7) and @Unauthenticated@ (16) are excluded because
+        auth outcomes depend on credentials the proxy does not manipulate.
+      * @Aborted@ (10) is excluded because it signals a concurrency\/transaction
+        conflict rechaos has no model of; 'FailedPrecondition' covers the
+        precondition case.
+      * @Unimplemented@ (12) is excluded because rechaos targets existing
+        methods; faking \"not implemented\" would misrepresent the surface.
 -}
 data Status
   = Cancelled
@@ -65,6 +95,46 @@ data Status
   | Unavailable
   | DataLoss
   deriving (Eq, Ord, Show, Enum, Bounded)
+
+{- | The canonical gRPC integer code for a 'Status'. Total: every constructor has
+  a fixed code, matching the canonical @grpc-status@ registry.
+
+      * 'Cancelled' = 1
+      * 'InvalidArgument' = 3
+      * 'DeadlineExceeded' = 4
+      * 'NotFound' = 5
+      * 'ResourceExhausted' = 8
+      * 'FailedPrecondition' = 9
+      * 'Internal' = 13
+      * 'Unavailable' = 14
+      * 'DataLoss' = 15
+-}
+statusCode :: Status -> Word8
+statusCode Cancelled = 1
+statusCode InvalidArgument = 3
+statusCode DeadlineExceeded = 4
+statusCode NotFound = 5
+statusCode ResourceExhausted = 8
+statusCode FailedPrecondition = 9
+statusCode Internal = 13
+statusCode Unavailable = 14
+statusCode DataLoss = 15
+
+{- | The total inverse of 'statusCode': recover the 'Status' from a gRPC integer
+  code, or 'Nothing' when the code is not one rechaos synthesizes (including the
+  deliberately excluded standard codes documented on 'Status').
+-}
+statusFromCode :: Word8 -> Maybe Status
+statusFromCode 1 = Just Cancelled
+statusFromCode 3 = Just InvalidArgument
+statusFromCode 4 = Just DeadlineExceeded
+statusFromCode 5 = Just NotFound
+statusFromCode 8 = Just ResourceExhausted
+statusFromCode 9 = Just FailedPrecondition
+statusFromCode 13 = Just Internal
+statusFromCode 14 = Just Unavailable
+statusFromCode 15 = Just DataLoss
+statusFromCode _ = Nothing
 
 -- | The algebra of faults rechaos can inject at a matched event.
 data Fault
@@ -121,6 +191,47 @@ data Rule = Rule
   -- ^ The fault injected when the rule fires.
   }
   deriving (Eq, Show)
+
+{- | The inclusive upper bound on a firing probability expressed in parts per
+  million: @1_000_000@ ppm = certainty. A 'Rule' with @chancePpm == maxPpm@
+  always fires; a value above it is out of range.
+-}
+maxPpm :: Natural
+maxPpm = 1_000_000
+
+{- | Validated entry point for building a 'Rule': returns 'Nothing' when
+  @chancePpm@ exceeds 'maxPpm', and @'Just' rule@ otherwise. The raw 'Rule'
+  constructor remains public (the scheduler and decoders pattern-match it), but
+  'mkRule' is the correct-by-construction path that cannot produce an
+  out-of-range firing probability.
+-}
+mkRule :: Target -> Natural -> Fault -> Maybe Rule
+mkRule t c f
+  | c > maxPpm = Nothing
+  | otherwise = Just (Rule{target = t, chancePpm = c, fault = f})
+
+{- | The inclusive upper bound on a 'Dribble' chunk size in bytes: @4_194_304@
+  (4 MiB). The JSON shell enforces @1 <= chunkBytes <= maxDribbleChunkBytes@;
+  promoting the bound here keeps it a named Core fact rather than a magic literal
+  in the decoder.
+-}
+maxDribbleChunkBytes :: Natural
+maxDribbleChunkBytes = 4_194_304
+
+{- | Total predicate capturing the intended numeric invariant of a 'Fault',
+  suitable as the basis for a future Lean lemma:
+
+      * 'Dribble' requires a positive @bytesPerSecond@ rate and a chunk size in
+        @1 .. 'maxDribbleChunkBytes'@ inclusive.
+      * every other fault is unconstrained here (always 'True').
+
+  This records the invariant in Core; wiring it into the decoder is out of scope
+  for this module.
+-}
+validFaultBounds :: Fault -> Bool
+validFaultBounds (Dribble rate chunkBytes) =
+  rate > 0 && chunkBytes >= 1 && chunkBytes <= maxDribbleChunkBytes
+validFaultBounds _ = True
 
 {- | A complete policy: a scheduling seed and an ordered list of rules. Rule order
   is significant; targeting uses first-match (see "Rechaos.Core.Scheduler").
@@ -189,9 +300,38 @@ eventKey e = (eMethod e, eOccurrence e, eDirection e, eMessageIndex e)
 
 -- Arrival time may vary during live replay. All other observations must agree.
 
+{- | The identity-significant projection of an 'Event' used by 'sameEvent':
+  every field /except/ 'eElapsedMicros', in the tuple shape
+  @(method, occurrence, direction, messageIndex, blobBytes, messageBytes,
+  payloadHash)@. Two events are \"the same\" when their fingerprints are equal.
+
+  Naming this value makes the comparison contract explicit rather than an
+  emergent property of zeroing 'eElapsedMicros' before a record equality check.
+-}
+newtype Fingerprint = Fingerprint (Text, Natural, Direction, Natural, Maybe Natural, Natural, Text)
+  deriving (Eq, Show)
+
+{- | Project an 'Event' onto its 'Fingerprint', capturing exactly the
+  identity-significant fields. 'eElapsedMicros' is deliberately excluded because
+  it may legitimately vary between a recording and a live replay of the same
+  event.
+-}
+fingerprint :: Event -> Fingerprint
+fingerprint e =
+  Fingerprint
+    ( eMethod e
+    , eOccurrence e
+    , eDirection e
+    , eMessageIndex e
+    , eBlobBytes e
+    , eMessageBytes e
+    , ePayloadHash e
+    )
+
 {- | Equality modulo arrival time. 'eElapsedMicros' is carved out because it may
   legitimately vary during live replay; every other field (identity, blob and
-  message sizes, payload hash) must agree exactly.
+  message sizes, payload hash) must agree exactly. Defined as 'Fingerprint'
+  equality so the compared field set is a single named value.
 -}
 sameEvent :: Event -> Event -> Bool
-sameEvent a b = a{eElapsedMicros = 0} == b{eElapsedMicros = 0}
+sameEvent a b = fingerprint a == fingerprint b
