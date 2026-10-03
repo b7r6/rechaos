@@ -572,6 +572,7 @@ main = do
         L.writeFile "test/golden/schedule.jsonl" scheduleBytes
         L.writeFile "test/golden/faults.json" faultBytes
         L.writeFile "test/golden/decisions.jsonl" decisionsBytes
+        L.writeFile "test/golden/oracle.jsonl" oracleBytes
         putStrLn "golden snapshots regenerated"
       Nothing -> do
         putStrLn "golden schedule snapshot matches committed bytes"
@@ -604,6 +605,13 @@ main = do
         putStrLn "reference schedule reproduces the committed decisions corpus"
         onDiskDecisions <- L.readFile "test/golden/decisions.jsonl"
         unless (onDiskDecisions == decisionsBytes) exitFailure
+        -- Reference-leads oracle conformance: the committed oracle corpus (shared
+        -- with the Lean compareBuilds_conforms_on_oracleScope anchor) is a byte
+        -- snapshot of the reference compareBuilds over the corpus scope. The
+        -- reference must reproduce those exact bytes.
+        putStrLn "reference compareBuilds reproduces the committed oracle corpus"
+        onDiskOracle <- L.readFile "test/golden/oracle.jsonl"
+        unless (onDiskOracle == oracleBytes) exitFailure
   -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
   goldenFaultRules :: [Rule]
   goldenFaultRules =
@@ -674,6 +682,101 @@ main = do
     jsonFault (Just (Dribble rate chunk)) =
       LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
     jsonFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
+  -- ── reference-leads oracle corpus (kept byte-identical to the shape
+  --    scripts/gen-conformance.hs emits; regenerate both via that script) ───────
+  -- The (treeA, treeB) scope the oracle differential is probed on: identity,
+  -- additions, deletions, hash/size/exec-bit/symlink-target changes, kind changes,
+  -- and multi-path diffs whose changes must appear in ascending key order. Mirrors
+  -- oracleTreePairs in the generator, so the reference compareBuilds reproduces the
+  -- committed oracle.jsonl byte-for-byte.
+  oracleTreePairs :: [([(T.Text, O.Entry)], [(T.Text, O.Entry)])]
+  oracleTreePairs =
+    [ ([], [])
+    , ([("a", O.File "h1" 10 False)], [("a", O.File "h1" 10 False)])
+    , ([], [("a", O.File "h1" 10 False)])
+    , ([("a", O.File "h1" 10 False)], [])
+    , ([("a", O.File "h1" 10 False)], [("a", O.File "h2" 10 False)])
+    , ([("a", O.File "h1" 10 False)], [("a", O.File "h1" 11 False)])
+    , ([("a", O.File "h1" 10 False)], [("a", O.File "h1" 10 True)])
+    , ([("a", O.Symlink "x")], [("a", O.Symlink "y")])
+    , ([("a", O.File "h1" 10 False)], [("a", O.Directory)])
+    , ([("a", O.Directory)], [("a", O.Symlink "t")])
+    , ([("a", O.File "h1" 10 False)], [("a", O.Symlink "t")])
+    ,
+      ( [("a", O.File "h1" 1 False), ("b", O.Directory), ("c", O.Symlink "t")]
+      , [("a", O.File "h1" 1 False), ("b", O.Directory), ("c", O.Symlink "t")]
+      )
+    ,
+      ( [("a", O.File "h1" 1 False), ("b", O.Directory), ("m", O.Symlink "x")]
+      , [("a", O.File "h9" 1 False), ("c", O.File "h3" 2 True), ("m", O.Symlink "y")]
+      )
+    , ([("b", O.File "h1" 1 False)], [("a", O.Directory), ("b", O.File "h1" 1 False)])
+    , ([("a", O.File "h1" 1 False)], [("a", O.File "h1" 1 False), ("z", O.Directory)])
+    , ([("a", O.File "h1" 1 False)], [("b", O.File "h1" 1 False)])
+    ,
+      ( [("a", O.Directory), ("c", O.Directory), ("e", O.Directory)]
+      , [("b", O.Directory), ("d", O.Directory), ("f", O.Directory)]
+      )
+    , ([("d1", O.Directory), ("d2", O.Directory)], [("d1", O.Directory), ("d2", O.Directory)])
+    ]
+  -- The committed oracle.jsonl bytes, built from the reference compareBuilds.
+  oracleBytes :: L.ByteString
+  oracleBytes = LC.unlines [oracleRow as bs | (as, bs) <- oracleTreePairs]
+   where
+    oracleRow as bs =
+      let a = M.fromList as
+          b = M.fromList bs
+       in LC.concat
+            [ LC.pack "{\"a\":"
+            , jsonTree a
+            , LC.pack ",\"b\":"
+            , jsonTree b
+            , LC.pack ",\"verdict\":"
+            , jsonVerdict (O.compareBuilds (O.Built a) (O.Built b))
+            , LC.pack "}"
+            ]
+    jsonTree t =
+      LC.concat
+        [ LC.pack "["
+        , LC.intercalate
+            (LC.pack ",")
+            [ LC.concat [LC.pack "[", LC.pack (show (T.unpack k)), LC.pack ",", jsonEntry e, LC.pack "]"]
+            | (k, e) <- M.toAscList t
+            ]
+        , LC.pack "]"
+        ]
+    jsonEntry (O.File h sz ex) =
+      LC.pack
+        ( "{\"kind\":\"file\",\"hash\":"
+            ++ show (T.unpack h)
+            ++ ",\"size\":"
+            ++ show sz
+            ++ ",\"exec\":"
+            ++ (if ex then "true" else "false")
+            ++ "}"
+        )
+    jsonEntry (O.Symlink t) = LC.pack ("{\"kind\":\"symlink\",\"target\":" ++ show (T.unpack t) ++ "}")
+    jsonEntry O.Directory = LC.pack "{\"kind\":\"directory\"}"
+    jsonOptEntry Nothing = LC.pack "null"
+    jsonOptEntry (Just e) = jsonEntry e
+    jsonVerdict O.Equivalent = LC.pack "{\"verdict\":\"equivalent\"}"
+    jsonVerdict O.Inconclusive = LC.pack "{\"verdict\":\"inconclusive\"}"
+    jsonVerdict (O.Diverged cs) =
+      LC.concat
+        [ LC.pack "{\"verdict\":\"diverged\",\"changes\":["
+        , LC.intercalate (LC.pack ",") (map jsonChange cs)
+        , LC.pack "]}"
+        ]
+    jsonChange (O.Change p x y) =
+      LC.concat
+        [ LC.pack "{\"path\":"
+        , LC.pack (show (T.unpack p))
+        , LC.pack ",\"before\":"
+        , jsonOptEntry x
+        , LC.pack ",\"after\":"
+        , jsonOptEntry y
+        , LC.pack "}"
+        ]
   isRight (Right _) = True
   isRight _ = False
   -- All but the last element; total (empty on lists of length < 2).

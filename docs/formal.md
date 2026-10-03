@@ -208,6 +208,91 @@ both the probability gate and the full first-match decisions over the committed
 scope, and the first-match selection semantics is additionally proved abstractly
 for all rule lists, draws, and events.
 
+## The output-tree oracle layer
+
+On top of the scheduler, the verified core now also models the **equivalence
+oracle**: the judgement that decides whether two builds produced the same outputs.
+The Lean port lives in [`lean/Rechaos/Oracle.lean`](../lean/Rechaos/Oracle.lean)
+and is faithful to the Haskell reference
+[`src/Rechaos/Core/Oracle.hs`](../src/Rechaos/Core/Oracle.hs).
+
+The same discipline holds: **the Haskell reference leads**. The concrete
+diff/verdict behaviour is pinned to the reference by a corpus that
+`scripts/gen-conformance.hs` generates *by running the real Haskell
+`compareBuilds`*; the equivalence-relation algebra is proved in Lean abstractly,
+needing no corpus.
+
+### Definition map: Haskell → Lean (oracle)
+
+| Concept | Haskell (`Rechaos.Core.Oracle`) | Lean (`Rechaos.Oracle`) |
+|---|---|---|
+| Output-tree node | `Entry = File Text Natural Bool \| Symlink Text \| Directory` | `Entry.file (contentHash) (sizeBytes) (executable) \| Entry.symlink (target) \| Entry.directory` |
+| Output tree | `type Tree = Map Text Entry` | `abbrev Tree := List (String × Entry)` (sorted by key) |
+| Per-path difference | `Change Text (Maybe Entry) (Maybe Entry)` | `structure Change { path, before, after }` |
+| Build outcome | `BuildResult = Built Tree \| BuildFailed Text \| BuildTimedOut` | `BuildResult.built \| .buildFailed \| .buildTimedOut` |
+| Verdict | `Verdict = Equivalent \| Diverged [Change] \| Inconclusive` | `Verdict.equivalent \| .diverged (changes) \| .inconclusive` |
+| Canonical difference | `diff :: Tree -> Tree -> [Change]` | `diff : Tree → Tree → List Change` |
+| Null-diff equivalence | `equivalent a b = null (diff a b)` | `equivalent a b := diff a b == []` |
+| Build verdict | `compareBuilds :: BuildResult -> BuildResult -> Verdict` | `compareBuilds : BuildResult → BuildResult → Verdict` |
+
+The Haskell `Tree` is a `Data.Map Text Entry` whose `diff` iterates the union of
+both trees' keys in ascending order (`S.toAscList (keysSet a ∪ keysSet b)`). The
+Lean `Tree` is a `List (String × Entry)` kept in ascending key order, and the Lean
+`diff` is the matching key-ordered merge: on equal keys it compares entries, and on
+unequal keys it emits the lesser-keyed side first. Over a sorted assoc list this
+produces exactly the reference's canonical, ascending, one-`Change`-per-path output.
+Equivalence is the null-diff criterion on both sides, and `compareBuilds` renders
+`Equivalent` / `Diverged` on two successful builds and `Inconclusive` whenever
+either build did not succeed — identical to the reference.
+
+### Proved in Lean (abstract, no corpus)
+
+These are in `lean/Rechaos/Oracle.lean`, proved over core Lean (no Mathlib, no
+`UInt64` arithmetic) by structural induction — establishing that `equivalent` is a
+genuine **equivalence relation** together with the empty-diff criterion:
+
+- `diff_nil_iff_equivalent` — **the empty-diff criterion**: `diff a b = []` iff
+  `equivalent a b`. Holds definitionally, since `equivalent` *is* the null-diff test.
+- `diff_self_nil` / `equivalent_refl` — **reflexivity**: a tree never differs from
+  itself, so every tree is equivalent to itself.
+- `diff_nil_imp_eq` — the structural crux: a null diff forces the two argument
+  lists to coincide (the merge returns `[]` only when it consumed both inputs in
+  lockstep on equal keys with equal entries). This needs no key-ordering lemmas,
+  only that each unequal-key branch emits a leading `Change`.
+- `equivalent_symm` — **symmetry**: `equivalent a b = equivalent b a`, routed
+  entirely through `diff_nil_imp_eq` and `diff_self_nil` (no antisymmetry of the key
+  order is required).
+- `equivalent_trans` — **transitivity**: `a ≡ b` and `b ≡ c` give `a ≡ c`, because
+  a null diff collapses to list equality, which composes.
+
+### Reference-leads differential (corpus, `native_decide`)
+
+`scripts/gen-conformance.hs` runs the real Haskell `compareBuilds` and emits the
+oracle corpus as a JSON golden *and* as Lean terms in
+[`lean/Rechaos/OracleCorpus.lean`](../lean/Rechaos/OracleCorpus.lean):
+
+- **output-tree oracle** — `test/golden/oracle.jsonl`, one row per `(treeA, treeB)`
+  over a scope spanning identity, additions, deletions, content-hash/size/
+  executable-bit changes, symlink-target changes, kind changes (file ↔ directory ↔
+  symlink), empty-vs-nonempty, disjoint key sets, and multi-path diffs whose changes
+  must land in ascending key order. Each row carries the reference `Verdict`
+  (equivalence, or divergence with the full canonical change list). The Lean theorem
+  `compareBuilds_conforms_on_oracleScope` checks, by `native_decide`, that the Lean
+  `compareBuilds` reproduces exactly the reference verdict — change list and all —
+  on every case.
+
+On the Haskell side, `CoreSpec.hs`'s golden-snapshot block re-derives the oracle
+corpus from the reference and fails if the committed bytes do not reproduce
+(byte-for-byte through `compareBuilds`). The golden is listed in `rechaos.cabal`'s
+`extra-source-files` so an unpacked `cabal sdist` can read it, and it is regenerated
+— alongside the SplitMix64, gate, and decisions corpora and the Lean files — by
+`scripts/gen-conformance.hs`.
+
+The Lean oracle is therefore **differentially conformant to the reference** on the
+full diff/verdict behaviour over the committed scope, and the equivalence-relation
+laws (reflexivity, symmetry, transitivity) plus the empty-diff criterion are
+additionally proved abstractly for all trees.
+
 ## Machine-checked in Lean vs. QuickCheck-only in Haskell
 
 It is important to be precise about the boundary between what the Lean kernel has
@@ -237,10 +322,17 @@ the kernel, not by examples.
   reference via the `native_decide` corpora (see "The scheduler layer" above). The
   exact bit-level tie between `iterate (fst . nextSeed)` and the production fold is
   still exercised by QuickCheck.
-- Everything outside the keystream: the status-code bijection, dribble pacing,
-  shrinker 1-minimality, oracle equivalence/transitivity, replay
-  incomplete-vs-changed semantics, and JSON round-trips. These live entirely in
-  `CoreSpec.hs` and have no Lean counterpart today.
+- The output-tree oracle's equivalence/transitivity are **now also proved in Lean**
+  (`lean/Rechaos/Oracle.lean`: `equivalent_refl` / `equivalent_symm` /
+  `equivalent_trans` / `diff_nil_iff_equivalent`), and the concrete diff/verdict
+  behaviour is pinned to the reference by the `native_decide` corpus
+  `compareBuilds_conforms_on_oracleScope` (see "The output-tree oracle layer"
+  above). The QuickCheck properties over `diff`/`compareBuilds` in `CoreSpec.hs`
+  remain as an independent sampled check on the reference itself.
+- Everything else outside the keystream: the status-code bijection, dribble pacing,
+  shrinker 1-minimality, replay incomplete-vs-changed semantics, and JSON
+  round-trips. These live entirely in `CoreSpec.hs` and have no Lean counterpart
+  today.
 
 In short: Lean proves that the keystream *is a deterministic, additive iteration
 of a single step per event*; QuickCheck checks that the *concrete SplitMix64 step*
