@@ -363,15 +363,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                        path, parsed.query, ""))
         req = urllib.request.Request(url=url, method=method,
                                      data=body if body else None)
-        # Copy client headers through, minus hop-by-hop, Host and Content-Length.
-        # urllib sets Host to the upstream netloc and recomputes Content-Length, so
-        # SigV4 presigned URLs keyed to the upstream host remain valid. We preserve
-        # Authorization / x-amz-* verbatim.
+        # Copy client headers through, minus hop-by-hop and Content-Length.
+        # urllib recomputes Content-Length per-leg. For SigV4 to validate at a
+        # loopback MinIO upstream we PRESERVE the client's Host header: the AWS SDK
+        # signs Host = its configured endpoint (this proxy), and MinIO validates
+        # the signature against the Host it receives, so passing the original Host
+        # through keeps the signature consistent. (For a real R2/S3 upstream whose
+        # presigned URL is keyed to the real host, set the SDK endpoint equal to
+        # that host and this preserves the same value -- still a no-op.)
+        orig_host = self.headers.get("Host")
         for name, value in self.headers.items():
             low = name.lower()
             if low in HOP_BY_HOP or low in ("host", "content-length"):
                 continue
             req.add_header(name, value)
+        if orig_host:
+            req.add_header("Host", orig_host)
         ctx = None
         if cfg.upstream_scheme == "https":
             ctx = ssl.create_default_context()

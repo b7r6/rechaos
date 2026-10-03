@@ -1,0 +1,103 @@
+// =============================================================================
+// s3-deathspiral.json5 -- ISOLATED, production-shaped NativeLink CAS rig whose
+// fast_slow SLOW tier is an AWS S3 client (ExperimentalCloudObjectStore / Aws)
+// pointed -- via AWS_ENDPOINT_URL in the environment -- at the rechaos S3 egress
+// fault proxy (scripts/s3_fault_proxy.py), which forwards to a disposable local
+// MinIO. Purpose: reproduce the CAS -> object-store write-back "death spiral".
+//
+// Topology:
+//
+//   python grpc client --grpc--> NativeLink (127.0.0.1:51055)
+//                                   CAS = fast_slow {
+//                                     fast: local filesystem (/tmp/rechaos/deathspiral/fast-*)
+//                                     slow: experimental_cloud_object_store / aws
+//                                   }                         |
+//                                   AWS SDK  --http (AWS_ENDPOINT_URL)-->
+//                                     s3_fault_proxy (127.0.0.1:51081)
+//                                        --http--> MinIO (127.0.0.1:51090)  bucket "cas"
+//
+// NOTHING here touches prod (:50052 / :50071). Fresh 510xx port range, all local
+// state under /tmp/rechaos/deathspiral.
+//
+// IMPORTANT schema note (this fork): the slow tier uses the
+//   StoreSpec::ExperimentalCloudObjectStore(ExperimentalCloudObjectSpec)
+// variant. ExperimentalCloudObjectSpec is serde(tag="provider") -- so the config
+// is FLAT with `provider: "aws"`, NOT nested under an `aws:` key. region/bucket
+// live on ExperimentalAwsSpec; key_prefix/retry/insecure_allow_http/
+// max_retry_buffer_per_request live on the flattened CommonObjectSpec. There is
+// NO `endpoint` field on the aws variant -- the endpoint comes from the AWS SDK
+// environment (AWS_ENDPOINT_URL / AWS_ENDPOINT_URL_S3). force_path_style is NOT
+// set by this store, so the SDK uses path-style for a custom endpoint, which is
+// what MinIO + the proxy expect.
+//
+// Launch env (see reports/s3-deathspiral-findings.md "Run recipe"):
+//   AWS_ENDPOINT_URL=http://127.0.0.1:51081
+//   AWS_ENDPOINT_URL_S3=http://127.0.0.1:51081
+//   AWS_ACCESS_KEY_ID=<MINIO_ROOT_USER>
+//   AWS_SECRET_ACCESS_KEY=<MINIO_ROOT_PASSWORD>
+//   AWS_REGION=us-east-1
+//   AWS_DEFAULT_REGION=us-east-1
+// =============================================================================
+{
+  stores: [
+    {
+      name: "CAS_FAST_SLOW",
+      fast_slow: {
+        // Write-back: ACK the client as soon as the FAST tier holds the blob;
+        // the SLOW (object store) write is a background task. This is the exact
+        // mode that decouples client liveness from the slow tier and is where a
+        // death spiral (unbounded in-flight slow writes, retry storm, silent
+        // data loss after ACK) can hide.
+        slow_store_write_back: true,
+        fast: {
+          filesystem: {
+            content_path: "/tmp/rechaos/deathspiral/fast-content",
+            temp_path: "/tmp/rechaos/deathspiral/fast-tmp",
+            eviction_policy: { max_bytes: 2147483648 },
+          },
+        },
+        slow: {
+          experimental_cloud_object_store: {
+            provider: "aws",
+            region: "us-east-1",
+            bucket: "cas",
+            key_prefix: "cas/",
+            insecure_allow_http: true,
+            // Keep in-flight retry buffer bounded but non-zero so the retry loop
+            // actually re-sends (zero would abort on first failure). 8 MiB covers
+            // the few-MiB blobs in the workload.
+            max_retry_buffer_per_request: 8388608,
+            retry: {
+              max_retries: 6,
+              delay: 0.3,
+              jitter: 0.5,
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "AC_MAIN",
+      filesystem: {
+        content_path: "/tmp/rechaos/deathspiral/ac-content",
+        temp_path: "/tmp/rechaos/deathspiral/ac-tmp",
+        eviction_policy: { max_bytes: 268435456 },
+      },
+    },
+  ],
+  servers: [
+    {
+      name: "deathspiral",
+      listener: { http: { socket_address: "127.0.0.1:51055" } },
+      services: {
+        cas: [ { instance_name: "main", cas_store: "CAS_FAST_SLOW" } ],
+        ac: [ { instance_name: "main", ac_store: "AC_MAIN" } ],
+        bytestream: [ { instance_name: "main", cas_store: "CAS_FAST_SLOW" } ],
+        capabilities: [ { instance_name: "main" } ],
+        health: {},
+        experimental_prometheus: { path: "/metrics" },
+      },
+    },
+  ],
+  global: { max_open_files: 24576 },
+}
