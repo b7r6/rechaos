@@ -1,0 +1,38 @@
+{
+  // Isolated local REAPI endpoint for chaos-monkey fix verification.
+  // Mirrors the deployed CAS_LOCAL *fast tier* (plain filesystem store, no
+  // verify wrapper) so the partial-upload / query-status bugs reproduce, but
+  // with NO R2 slow tier and NO worker — nothing here touches prod or cloud.
+  "stores": [
+    {
+      "name": "CAS",
+      "filesystem": {
+        "content_path": "/tmp/rechaos/testsrv/cas-content",
+        "temp_path": "/tmp/rechaos/testsrv/cas-tmp",
+        "eviction_policy": { "max_bytes": 2147483648 }
+      }
+    },
+    {
+      "name": "AC",
+      "filesystem": {
+        "content_path": "/tmp/rechaos/testsrv/ac-content",
+        "temp_path": "/tmp/rechaos/testsrv/ac-tmp",
+        "eviction_policy": { "max_bytes": 268435456 }
+      }
+    }
+  ],
+  "servers": [
+    {
+      "name": "test",
+      "listener": { "http": { "socket_address": "127.0.0.1:50099" } },
+      "services": {
+        "cas": [ { "instance_name": "main", "cas_store": "CAS" } ],
+        "ac": [ { "instance_name": "main", "ac_store": "AC" } ],
+        "bytestream": [ { "instance_name": "main", "cas_store": "CAS" } ],
+        "capabilities": [ { "instance_name": "main" } ],
+        "health": {},
+        "experimental_prometheus": {}
+      }
+    }
+  ]
+}

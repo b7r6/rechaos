@@ -1,0 +1,16 @@
+.ghc
+.python
+.bazel
+result
+dist-newstyle/
+.build/
+bin/
+runs/
+__pycache__/
+*.hi
+*.o
+result-*
+.bazel/
+.ghc/
+.python/
+*.pyc

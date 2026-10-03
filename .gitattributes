@@ -1,0 +1,3 @@
+# Preserve generated protocol text and captured process output verbatim.
+generated/** linguist-generated=true -whitespace
+reports/evidence/*.log -whitespace

@@ -1,0 +1,80 @@
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+--                                                                 // rechaos // shell // oracle
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+--
+--   filesystem snapshot and SHA256 capture
+--
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{-# LANGUAGE OverloadedStrings #-}
+
+module Rechaos.Shell.Oracle (snapshot, oracleJSON, compareTrees) where
+
+import Control.Exception (evaluate)
+import Control.Monad (forM, unless)
+import Data.Aeson (Value, object, (.=))
+import Data.Bits ((.&.))
+import qualified Data.ByteString.Lazy as L
+import Data.List (sort)
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
+import Rechaos.Core.Oracle
+import Rechaos.Shell.Protocol (sha256)
+import System.Directory (listDirectory)
+import System.FilePath ((</>))
+import System.IO (IOMode (ReadMode), withBinaryFile)
+import System.Posix.Files
+
+snapshot :: FilePath -> IO Tree
+snapshot root = do
+  status <- getSymbolicLinkStatus root
+  unless (isDirectory status) $ fail "oracle root must be an existing directory (not a symlink)"
+  M.fromList <$> walk "" root
+ where
+  walk relative absolute = do
+    before <- getSymbolicLinkStatus absolute
+    entry <-
+      if isSymbolicLink before
+        then
+          Symlink . T.pack <$> readSymbolicLink absolute
+        else
+          if isDirectory before
+            then pure Directory
+            else
+              if isRegularFile before
+                then withBinaryFile absolute ReadMode $ \h -> do
+                  bytes <- L.hGetContents h
+                  let digest = sha256 bytes
+                  _ <- evaluate (T.length digest)
+                  pure (File digest (fromIntegral (fileSize before)) (fileMode before .&. 0o111 /= 0))
+                else fail ("unsupported output node: " ++ absolute)
+    children <-
+      if isDirectory before
+        then do
+          names <- sort <$> listDirectory absolute
+          concat
+            <$> forM names (\name -> walk (if null relative then name else relative </> name) (absolute </> name))
+        else pure []
+    after <- getSymbolicLinkStatus absolute
+    unless (stable before after) $ fail ("output changed while hashing: " ++ absolute)
+    pure ((T.pack relative, entry) : children)
+  stable a b =
+    fileID a == fileID b
+      && deviceID a == deviceID b
+      && fileSize a == fileSize b
+      && fileMode a == fileMode b
+      && modificationTimeHiRes a == modificationTimeHiRes b
+      && statusChangeTimeHiRes a == statusChangeTimeHiRes b
+
+oracleJSON :: Verdict -> Value
+oracleJSON Equivalent = object ["verdict" .= ("equivalent" :: T.Text)]
+oracleJSON Inconclusive = object ["verdict" .= ("inconclusive" :: T.Text)]
+oracleJSON (Diverged changes) =
+  object
+    [ "verdict" .= ("diverged" :: T.Text)
+    , "changes"
+        .= [ object ["path" .= path, "clean" .= fmap show a, "chaos" .= fmap show b] | Change path a b <- changes
+           ]
+    ]
+
+compareTrees :: FilePath -> FilePath -> IO Verdict
+compareTrees a b = compareBuilds <$> (Built <$> snapshot a) <*> (Built <$> snapshot b)

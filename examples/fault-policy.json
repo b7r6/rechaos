@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "seed": 20261002,
+  "rules": [
+    {
+      "target": {
+        "method": "google.bytestream.ByteStream/Read",
+        "direction": "response",
+        "occurrence": 1,
+        "messageIndex": 1,
+        "minBlobBytes": 2
+      },
+      "fault": {"kind": "truncate", "keepBytes": 1}
+    },
+    {
+      "target": {
+        "method": "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs",
+        "direction": "response"
+      },
+      "chancePpm": 500000,
+      "fault": {"kind": "abort", "status": "Unavailable"}
+    },
+    {
+      "target": {
+        "method": "google.bytestream.ByteStream/Write",
+        "direction": "request"
+      },
+      "fault": {"kind": "dribble", "bytesPerSecond": 65536, "chunkBytes": 4096}
+    }
+  ]
+}

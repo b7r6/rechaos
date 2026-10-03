@@ -1,0 +1,16 @@
+# HLint configuration for rechaos.
+# The core is deliberately small and explicit; a few defaults that fight the
+# house style are relaxed rather than reworking clear code to satisfy a lint.
+
+- ignore: { name: "Use camelCase" }       # generated proto-lens code
+- ignore: { name: "Redundant bracket", within: [] }
+- ignore: { name: "Avoid lambda" }
+- ignore: { name: "Use <$>" }
+
+# Keep partial functions out of the pure core.
+- functions:
+    - { name: head, within: [] }
+    - { name: tail, within: [] }
+    - { name: fromJust, within: [] }
+    - { name: undefined, within: [] }
+    - { name: error, within: [] }

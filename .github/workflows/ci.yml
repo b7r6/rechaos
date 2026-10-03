@@ -1,0 +1,40 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#                                                                        // ci
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Two gates on every push/PR:
+#   build — hermetic `nix build`, which compiles the gateway and runs the pure
+#           core checks (seeded scheduler evaluation, serialization round-trips,
+#           targeting boundaries, replay mismatch/coverage, oracle, shrinking).
+#   style — fourmolu format check against the committed fourmolu.yaml.
+# GitHub-compatible syntax; also runs under Forgejo/Gitea Actions.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: nix build (gateway + pure core checks)
+        run: nix build -L
+
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/run-fourmolu@v11
+        with:
+          version: "0.19.0.1"
+          pattern: |
+            app/**/*.hs
+            src/**/*.hs
+            test/**/*.hs

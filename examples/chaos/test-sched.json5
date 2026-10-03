@@ -1,0 +1,102 @@
+{
+  // Isolated single-process NativeLink for scheduler queue-GC leak chaos testing.
+  // NO worker: actions stay QUEUED; terminal state is driven via client cancel/timeout.
+  // Scheduler uses the in-memory awaited-action backend (experimental_backend omitted => memory default).
+  stores: [
+    {
+      name: "CAS",
+      filesystem: {
+        content_path: "/tmp/rechaos/schedsrv/cas-content",
+        temp_path: "/tmp/rechaos/schedsrv/cas-tmp",
+        eviction_policy: {
+          max_bytes: 1000000000,
+        },
+      },
+    },
+    {
+      name: "AC",
+      filesystem: {
+        content_path: "/tmp/rechaos/schedsrv/ac-content",
+        temp_path: "/tmp/rechaos/schedsrv/ac-tmp",
+        eviction_policy: {
+          max_bytes: 200000000,
+        },
+      },
+    },
+  ],
+  schedulers: [
+    {
+      name: "MAIN_SCHEDULER",
+      simple: {
+        // Minimal platform property map.
+        supported_platform_properties: {
+          OSFamily: "exact",
+          cpu_arch: "exact",
+        },
+        // Aggressive-but-valid timeouts so terminal/abandoned states and
+        // completed-retention sweeps happen fast.
+        retain_completed_for_s: 5,
+        // Must be > CLIENT_KEEPALIVE_DURATION (10s) or the scheduler errors/clamps.
+        client_action_timeout_s: 11,
+        worker_timeout_s: 5,
+        max_action_executing_timeout_s: 15,
+        max_job_retries: 1,
+        allocation_strategy: "least_recently_used",
+        worker_match_logging_interval_s: 10,
+        fallback_match_interval_s: 5,
+      },
+    },
+  ],
+  servers: [
+    {
+      name: "chaos",
+      listener: {
+        http: {
+          socket_address: "127.0.0.1:50090",
+        },
+      },
+      services: {
+        cas: [
+          {
+            instance_name: "main",
+            cas_store: "CAS",
+          },
+        ],
+        ac: [
+          {
+            instance_name: "main",
+            ac_store: "AC",
+          },
+        ],
+        bytestream: [
+          {
+            instance_name: "main",
+            cas_store: "CAS",
+          },
+        ],
+        execution: [
+          {
+            instance_name: "main",
+            cas_store: "CAS",
+            scheduler: "MAIN_SCHEDULER",
+          },
+        ],
+        capabilities: [
+          {
+            instance_name: "main",
+            remote_execution: {
+              scheduler: "MAIN_SCHEDULER",
+            },
+          },
+        ],
+        health: {},
+        experimental_prometheus: {
+          path: "/metrics",
+        },
+      },
+    },
+  ],
+  global: {
+    max_open_files: 24576,
+  },
+}

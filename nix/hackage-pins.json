@@ -1,0 +1,38 @@
+{
+  "grapesy": {
+    "version": "1.2.1",
+    "sha256": "sha256-vkDdqG2aCNBCUE2blLT4N37QipzkX+5BO40GN6UJUco="
+  },
+  "grpc-spec": {
+    "version": "1.1.0",
+    "sha256": "sha256-cNxwKpI6p7JCN+kbb4Pz97vkALMwiWJo0oFN6Ja8tCQ="
+  },
+  "http2": {
+    "version": "5.4.6",
+    "sha256": "sha256-JCsoEdN2/tYm9l6tvb9tT+CZCIJJMM2+UOCJ9c/lnHk="
+  },
+  "http-semantics": {
+    "version": "0.4.1",
+    "sha256": "sha256-oC3xHfjV6rrQKM5MLR76iJrmjlVtupSw0Tp1AXl0U9s="
+  },
+  "http2-tls": {
+    "version": "0.5.1",
+    "sha256": "sha256-ggpmXlD699Thcxs8jEHSKT+ksED1H2YxFdLdlr2tjCI="
+  },
+  "network-run": {
+    "version": "0.5.0",
+    "sha256": "sha256-3lxkPpUFHn7UyFjPcTS1LLr+W9p+WqORiT5Rx8LL3Hg="
+  },
+  "time-manager": {
+    "version": "0.3.2",
+    "sha256": "sha256-d23sHgAKnDBrF0dJV3bCQAWRprUbLNWLg1zXpCntNhk="
+  },
+  "tls": {
+    "version": "2.1.11",
+    "sha256": "sha256-BZoXM5hQTwPNzzNUPuM7pFCCwycPUqTVgQ+E3ff2hOM="
+  },
+  "random": {
+    "version": "1.3.1",
+    "sha256": "sha256-2ECsg/JlsM+ipnj47HhifrUM+b4vBnxSyKQjnCm3GjU="
+  }
+}
