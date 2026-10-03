@@ -17,6 +17,7 @@ import Data.ByteString.Lazy qualified as L
 import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.List (sort)
 import Data.Map.Strict qualified as M
+import Data.Maybe (mapMaybe)
 import Data.Text qualified as T
 import Data.Word (Word64, Word8)
 import Numeric.Natural (Natural)
@@ -578,6 +579,14 @@ main = do
         putStrLn "golden faults snapshot matches committed bytes"
         onDiskFaults <- L.readFile "test/golden/faults.json"
         unless (onDiskFaults == faultBytes) exitFailure
+        -- Reference-leads conformance: the committed corpus (also consumed by the
+        -- Lean model's native_decide anchor) must be reproduced by this reference
+        -- nextSeed, row by row. Regenerate both via scripts/gen-conformance.hs.
+        putStrLn "reference nextSeed reproduces the committed SplitMix64 conformance corpus"
+        splitmixLines <- LC.lines <$> L.readFile "test/golden/splitmix.jsonl"
+        let splitmixRows = mapMaybe decode splitmixLines :: [(Word64, Word64, Word64)]
+        unless (length splitmixRows == length splitmixLines) exitFailure
+        unless (all (\(s, o, st) -> nextSeed s == (st, o)) splitmixRows) exitFailure
   -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
   goldenFaultRules :: [Rule]
   goldenFaultRules =
