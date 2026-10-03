@@ -573,6 +573,7 @@ main = do
         L.writeFile "test/golden/faults.json" faultBytes
         L.writeFile "test/golden/decisions.jsonl" decisionsBytes
         L.writeFile "test/golden/oracle.jsonl" oracleBytes
+        L.writeFile "test/golden/minimize.jsonl" minimizeBytes
         putStrLn "golden snapshots regenerated"
       Nothing -> do
         putStrLn "golden schedule snapshot matches committed bytes"
@@ -612,6 +613,14 @@ main = do
         putStrLn "reference compareBuilds reproduces the committed oracle corpus"
         onDiskOracle <- L.readFile "test/golden/oracle.jsonl"
         unless (onDiskOracle == oracleBytes) exitFailure
+        -- Reference-leads minimizer conformance: the committed minimize corpus
+        -- (shared with the Lean candidates_conforms_on_candidateScope and
+        -- runShrink_conforms_on_trajectoryScope native_decide anchors) is a byte
+        -- snapshot of the reference candidates + shrink trajectories over the corpus
+        -- scope. The reference must reproduce those exact bytes.
+        putStrLn "reference minimizer reproduces the committed minimize corpus"
+        onDiskMinimize <- L.readFile "test/golden/minimize.jsonl"
+        unless (onDiskMinimize == minimizeBytes) exitFailure
   -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
   goldenFaultRules :: [Rule]
   goldenFaultRules =
@@ -777,6 +786,125 @@ main = do
         , jsonOptEntry y
         , LC.pack "}"
         ]
+  -- ── reference-leads minimizer corpus (kept byte-identical to the shape
+  --    scripts/gen-conformance.hs emits; regenerate both via that script) ───────
+  -- A fixed anchor event the minimizer timelines hang their faults on. Mirrors
+  -- minimizeEvent in the generator (messageBytes = 64 so intensity caps are
+  -- nontrivial and every weaker branch is exercised).
+  minimizeEvent :: Natural -> Event
+  minimizeEvent i = Event "google.bytestream.ByteStream/Read" i Response 1 (Just 100) (i * 10) 64 "h"
+  minimizeDecision :: Natural -> Maybe Fault -> Decision
+  minimizeDecision i = Decision (minimizeEvent i)
+  -- The candidate-generation scope, identical to minimizeScope in the generator.
+  minimizeScope :: [Timeline]
+  minimizeScope =
+    [ []
+    , [minimizeDecision 1 (Just (Delay 8))]
+    , [minimizeDecision 1 (Just (Delay 1))]
+    , [minimizeDecision 1 (Just (Delay 0))]
+    , [minimizeDecision 1 (Just (Truncate 0))]
+    , [minimizeDecision 1 (Just (Truncate 63))]
+    , [minimizeDecision 1 (Just (Truncate 64))]
+    , [minimizeDecision 1 (Just (Dribble 1 16))]
+    , [minimizeDecision 1 (Just (Dribble (64 * 1000000) 16))]
+    , [minimizeDecision 1 (Just (Abort Internal))]
+    , [minimizeDecision 1 (Just (Delay 4)), minimizeDecision 2 (Just (Truncate 10))]
+    ,
+      [ minimizeDecision 1 (Just (Delay 4))
+      , minimizeDecision 2 Nothing
+      , minimizeDecision 3 (Just (Dribble 2 8))
+      ]
+    ,
+      [ minimizeDecision 1 (Just (Delay 2))
+      , minimizeDecision 2 (Just (Truncate 60))
+      , minimizeDecision 3 (Just (Abort NotFound))
+      , minimizeDecision 4 (Just (Delay 16))
+      ]
+    ]
+  -- A deterministic oracle: a candidate triggers iff it retains a Delay of at
+  -- least `threshold` micros. Mirrors triggersAtLeast in the generator.
+  minTriggersAtLeast :: Natural -> Timeline -> Min.Verdict
+  minTriggersAtLeast threshold tl =
+    if any delayAtLeast tl then Min.Triggers else Min.DoesNotTrigger
+   where
+    delayAtLeast d = case injection d of
+      Just (Delay n) -> n >= threshold
+      _ -> False
+  -- Drive the acceptance state machine to convergence, bounded by fuel. Mirrors
+  -- runShrink in the generator, using only the reference start/candidate/observe.
+  minRunShrink :: (Timeline -> Min.Verdict) -> Int -> Min.ShrinkState -> Timeline
+  minRunShrink _ 0 st = Min.best st
+  minRunShrink oracle fuel st = case Min.candidate st of
+    Nothing -> Min.best st
+    Just c -> minRunShrink oracle (fuel - 1) (Min.observe (oracle c) st)
+  -- The shrink-trajectory seeds, identical to trajectorySeeds in the generator.
+  minimizeTrajectorySeeds :: [(Timeline, Natural)]
+  minimizeTrajectorySeeds =
+    [ ([minimizeDecision 1 (Just (Delay 8))], 1)
+    , ([minimizeDecision 1 (Just (Delay 8)), minimizeDecision 2 (Just (Truncate 10))], 1)
+    ,
+      (
+        [ minimizeDecision 1 (Just (Delay 4))
+        , minimizeDecision 2 (Just (Abort NotFound))
+        , minimizeDecision 3 (Just (Delay 16))
+        ]
+      , 4
+      )
+    ,
+      (
+        [ minimizeDecision 1 (Just (Truncate 0))
+        , minimizeDecision 2 (Just (Delay 10))
+        ]
+      , 3
+      )
+    ]
+  -- The committed minimize.jsonl bytes: the reference candidate sets over the
+  -- candidate scope, followed by the converged bests over the trajectory scope.
+  minimizeBytes :: L.ByteString
+  minimizeBytes =
+    LC.unlines [candidateRow tl | tl <- minimizeScope]
+      `L.append` LC.unlines [trajectoryRow tl th | (tl, th) <- minimizeTrajectorySeeds]
+   where
+    candidateRow tl =
+      LC.concat
+        [ LC.pack "{\"input\":"
+        , jsonMinTimeline tl
+        , LC.pack ",\"candidates\":["
+        , LC.intercalate (LC.pack ",") (map jsonMinTimeline (Min.candidates tl))
+        , LC.pack "]}"
+        ]
+    trajectoryRow tl th =
+      LC.concat
+        [ LC.pack "{\"input\":"
+        , jsonMinTimeline tl
+        , LC.pack ",\"threshold\":"
+        , LC.pack (show th)
+        , LC.pack ",\"best\":"
+        , jsonMinTimeline (minRunShrink (minTriggersAtLeast th) 500 (Min.start tl))
+        , LC.pack "}"
+        ]
+    jsonMinTimeline tl =
+      LC.concat
+        [ LC.pack "["
+        , LC.intercalate
+            (LC.pack ",")
+            [ LC.concat
+                [ LC.pack "["
+                , LC.pack (show (eOccurrence (event d)))
+                , LC.pack ","
+                , jsonMinFault (injection d)
+                , LC.pack "]"
+                ]
+            | d <- tl
+            ]
+        , LC.pack "]"
+        ]
+    jsonMinFault Nothing = LC.pack "null"
+    jsonMinFault (Just (Delay n)) = LC.pack ("{\"delay\":" ++ show n ++ "}")
+    jsonMinFault (Just (Abort st)) = LC.pack ("{\"abort\":" ++ show (statusCode st) ++ "}")
+    jsonMinFault (Just (Dribble rate chunk)) =
+      LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
+    jsonMinFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
   isRight (Right _) = True
   isRight _ = False
   -- All but the last element; total (empty on lists of length < 2).

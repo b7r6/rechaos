@@ -293,6 +293,104 @@ full diff/verdict behaviour over the committed scope, and the equivalence-relati
 laws (reflexivity, symmetry, transitivity) plus the empty-diff criterion are
 additionally proved abstractly for all trees.
 
+## The minimizer layer
+
+On top of the oracle, the verified core now also models the **minimizer**
+(shrinker): the witness-preserving search that reduces a failing `Timeline` to a
+small reproducer. The Lean port lives in
+[`lean/Rechaos/Minimize.lean`](../lean/Rechaos/Minimize.lean) and is faithful to
+the Haskell reference
+[`src/Rechaos/Core/Minimize.hs`](../src/Rechaos/Core/Minimize.hs).
+
+The same discipline holds: **the Haskell reference leads**. The concrete candidate
+set and one acceptance-driven shrink trajectory are pinned to the reference by a
+corpus that `scripts/gen-conformance.hs` generates *by running the real Haskell
+`candidates`/`start`/`observe`*; the two load-bearing properties — candidate
+**termination** and acceptance **witness preservation** — are proved in Lean
+abstractly, needing no corpus.
+
+### Definition map: Haskell → Lean (minimizer)
+
+| Concept | Haskell (`Rechaos.Core.Minimize`) | Lean (`Rechaos.Minimize`) |
+|---|---|---|
+| Shell verdict | `Verdict = Triggers \| DoesNotTrigger \| Unknown` | `MinimizeVerdict.triggers \| .doesNotTrigger \| .unknown` |
+| Minimizer state | `ShrinkState { best :: Timeline, pending :: [Timeline] }` | `structure ShrinkState { best, pending }` |
+| Seed from a failure | `start :: Timeline -> ShrinkState` | `start : Timeline → ShrinkState` |
+| Next candidate | `candidate :: ShrinkState -> Maybe Timeline` | `candidate : ShrinkState → Option Timeline` |
+| Fold a verdict in | `observe :: Verdict -> ShrinkState -> ShrinkState` | `observe : MinimizeVerdict → ShrinkState → ShrinkState` |
+| Candidate set | `candidates :: Timeline -> [Timeline]` | `candidates : Timeline → List Timeline` |
+| Strictly-weaker fault | `weaker :: Event -> Fault -> [Fault]` | `weaker : Event → Fault → List Fault` |
+
+`candidates` offers chunk deletions at halving sizes down to singletons (making a
+converged result deletion-1-minimal for a deterministic predicate) plus intensity
+reductions that replace one injected fault with a strictly weaker one. The Lean
+port reproduces the reference `nub (deletions ++ intensities)` set exactly: the
+halving `descending` sweep and the `[0, k .. n-1]` stride are rendered as
+fuel-bounded structural recursions (`descending`, `strideOffsets`), and `weaker`
+matches branch-for-branch — `delay` halves toward zero, `dribble` doubles its rate
+toward the full-speed cap `messageBytes * microsPerSecond`, `truncate` raises its
+kept-byte count toward the message size, and `abort` has no weaker form. `observe`
+accepts a candidate — advancing `best` and re-seeding `pending` from the smaller
+timeline — **only** on `triggers`; `doesNotTrigger` and `unknown` both discard it,
+so a flake/timeout is never mistaken for a reproduction.
+
+### Proved in Lean (abstract, no corpus)
+
+These are in `lean/Rechaos/Minimize.lean`, proved over core Lean (no Mathlib, no
+`UInt64` arithmetic — every intensity quantity is `Nat`):
+
+- `weaker_severity_lt` — **the termination engine**: every fault `weaker` emits is
+  strictly weaker at its anchoring event under the `severity` measure (`delay`
+  micros, bytes dropped below the message for `truncate`, rate below the cap for
+  `dribble`). Proved by cases on the fault with each branch's numeric
+  side-condition.
+- `summedIntensity_append` / `summedIntensity_singleton` — additivity of the
+  summed-intensity measure over the `take ++ [replacement] ++ drop` splice the
+  intensity candidates perform.
+- `deletion_length_lt` — a nonempty contiguous deletion strictly shrinks the
+  length, hence the measure. Together with `weaker_severity_lt` this is
+  **TERMINATION**: every generated candidate is strictly smaller than its input
+  under the well-founded `(length, summed-intensity)` measure (`measure` /
+  `measureLt`), so the shrink loop terminates.
+- `observe_best_triggers` — **WITNESS PRESERVATION**: `observe` advances `best` to
+  a new timeline only on a `triggers` verdict, and the new `best` is exactly the
+  candidate the external checker reported `triggers` on. Given a truthful checker,
+  every accepted `best` is a confirmed reproduction.
+- `observe_unknown_preserves_best` / `observe_unknown_eq_doesNotTrigger` — the
+  **conservative** half: an `unknown` verdict never advances `best` and is
+  observationally identical to `doesNotTrigger`.
+
+### Reference-leads differential (corpus, `native_decide`)
+
+`scripts/gen-conformance.hs` runs the real Haskell minimizer and emits the corpus
+as a JSON golden *and* as Lean terms in
+[`lean/Rechaos/MinimizeCorpus.lean`](../lean/Rechaos/MinimizeCorpus.lean):
+
+- **candidate generation** — `test/golden/minimize.jsonl` (first block), one row
+  per input `Timeline` over a scope spanning the empty timeline, single faults of
+  every intensity-bearing constructor at interior and boundary (cap) values,
+  `abort` (no weaker form), passthrough (`Nothing`) decisions, and multi-fault
+  timelines. Each row carries the reference `candidates` set. The Lean theorem
+  `candidates_conforms_on_candidateScope` checks, by `native_decide`, that the Lean
+  `candidates` reproduces that set exactly on every case.
+- **acceptance trajectory** — `test/golden/minimize.jsonl` (second block), one row
+  per `(timeline, threshold)` seed driven to convergence by `start`/`candidate`/
+  `observe` under a deterministic oracle (a candidate triggers iff it retains a
+  `delay` of at least `threshold` micros). Each row carries the converged `best`.
+  The Lean theorem `runShrink_conforms_on_trajectoryScope` ports the same
+  deterministic oracle and fuel-bounded driver and checks, by `native_decide`, that
+  the Lean minimizer shrinks to exactly the reference `best`.
+
+On the Haskell side, `CoreSpec.hs`'s golden-snapshot block re-derives both corpus
+blocks from the reference and fails if the committed bytes do not reproduce. The
+golden is listed in `rechaos.cabal`'s `extra-source-files`, and it is regenerated —
+alongside the other corpora and Lean files — by `scripts/gen-conformance.hs`.
+
+The Lean minimizer is therefore **differentially conformant to the reference** on
+both candidate generation and the acceptance state machine over the committed
+scope, and termination plus witness preservation are additionally proved abstractly
+for all timelines.
+
 ## Machine-checked in Lean vs. QuickCheck-only in Haskell
 
 It is important to be precise about the boundary between what the Lean kernel has
@@ -329,10 +427,20 @@ the kernel, not by examples.
   `compareBuilds_conforms_on_oracleScope` (see "The output-tree oracle layer"
   above). The QuickCheck properties over `diff`/`compareBuilds` in `CoreSpec.hs`
   remain as an independent sampled check on the reference itself.
+- The minimizer's candidate generation and acceptance state machine are **now also
+  proved/pinned in Lean** (`lean/Rechaos/Minimize.lean`): termination under the
+  `(length, summed-intensity)` measure (`weaker_severity_lt` / `deletion_length_lt`)
+  and witness preservation (`observe_best_triggers`, with the conservative
+  `observe_unknown_*` lemmas) are proved abstractly, and the concrete candidate
+  set + one shrink trajectory are pinned to the reference by the `native_decide`
+  corpora `candidates_conforms_on_candidateScope` and
+  `runShrink_conforms_on_trajectoryScope` (see "The minimizer layer" above). The
+  QuickCheck properties over `candidates`/`observe` in `CoreSpec.hs` (including
+  deletion-1-minimality of a converged result) remain as an independent sampled
+  check on the reference itself.
 - Everything else outside the keystream: the status-code bijection, dribble pacing,
-  shrinker 1-minimality, replay incomplete-vs-changed semantics, and JSON
-  round-trips. These live entirely in `CoreSpec.hs` and have no Lean counterpart
-  today.
+  replay incomplete-vs-changed semantics, and JSON round-trips. These live entirely
+  in `CoreSpec.hs` and have no Lean counterpart today.
 
 In short: Lean proves that the keystream *is a deterministic, additive iteration
 of a single step per event*; QuickCheck checks that the *concrete SplitMix64 step*
