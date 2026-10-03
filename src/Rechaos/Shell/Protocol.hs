@@ -34,10 +34,12 @@ import qualified Proto.Google.Bytestream.Bytestream_Fields as F
 import Rechaos.Core.Types
 import Text.Read (readMaybe)
 
-readMethod, writeMethod, missingMethod :: Text
+readMethod, writeMethod, missingMethod, batchReadMethod, batchUpdateMethod :: Text
 readMethod = "google.bytestream.ByteStream/Read"
 writeMethod = "google.bytestream.ByteStream/Write"
 missingMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
+batchReadMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs"
+batchUpdateMethod = "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs"
 
 decode :: (Message a) => L.ByteString -> Either String a
 decode = decodeMessage . L.toStrict
@@ -66,11 +68,20 @@ blobSize method bytes
         (decode bytes :: Either String BS.WriteRequest)
   | method == missingMethod =
       either (const Nothing) sizes (decode bytes :: Either String RE.FindMissingBlobsRequest)
+  | method == batchReadMethod =
+      either
+        (const Nothing)
+        (sumSizes . map (^. R.sizeBytes) . (^. R.digests))
+        (decode bytes :: Either String RE.BatchReadBlobsRequest)
+  | method == batchUpdateMethod =
+      either
+        (const Nothing)
+        (sumSizes . map (^. R.digest . R.sizeBytes) . (^. R.requests))
+        (decode bytes :: Either String RE.BatchUpdateBlobsRequest)
   | otherwise = Nothing
  where
-  sizes req =
-    let ns = map (^. R.sizeBytes) (req ^. R.blobDigests)
-     in if all (>= 0) ns then Just (sum (map fromIntegral ns)) else Nothing
+  sizes req = sumSizes (map (^. R.sizeBytes) (req ^. R.blobDigests))
+  sumSizes ns = if all (>= 0) ns then Just (sum (map fromIntegral ns)) else Nothing
 
 messageSize :: Text -> Direction -> L.ByteString -> Natural
 messageSize method direction bytes

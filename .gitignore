@@ -14,3 +14,5 @@ result-*
 .ghc/
 .python/
 *.pyc
+.revamp-staging/
+.claude/

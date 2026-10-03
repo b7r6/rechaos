@@ -1,0 +1,156 @@
+cabal-version:      3.0
+name:               rechaos
+version:            0.1.0
+synopsis:
+  Black-box chaos and determinism tool for the Bazel Remote Execution API
+
+description:
+  A black-box chaos and determinism tool for the Bazel Remote Execution API
+  (REAPI) and compatible endpoints such as NativeLink. rechaos sits as a
+  gateway between a build client and an unmodified remote endpoint, injects
+  faults into the wire traffic, and checks correctness and liveness invariants
+  — then deterministically replays, compares, and shrinks any failure to a
+  minimal witness.
+  .
+  The scheduler, replay checks, output-tree comparison, and shrinking
+  decisions are pure Haskell; grapesy handles the wire. A continuous chaos
+  monkey drives randomized fault policies and adversarial clients and freezes
+  every finding as a replayable reproducer.
+
+category:           Testing, Distributed Computing
+author:             b7r6.net@gmail.com
+maintainer:         b7r6.net@gmail.com
+homepage:           https://github.com/b7r6/rechaos
+bug-reports:        https://github.com/b7r6/rechaos
+license:            MIT
+license-file:       LICENSE
+tested-with:        GHC ==9.10.3
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
+extra-source-files:
+  examples/fault-policy.json
+  proto/googleapis-LICENSE
+  proto/remote-apis-LICENSE
+
+source-repository head
+  type:     git
+  location: https://github.com/b7r6/rechaos
+
+common warnings
+  default-language:   GHC2021
+  default-extensions:
+    OverloadedStrings
+    ScopedTypeVariables
+
+  ghc-options:        -Wall -Wcompat
+
+-- Generated proto-lens modules are machine-written and cannot satisfy -Wall;
+-- isolate them in their own library with warnings disabled so -Wall stays
+-- meaningful for the hand-written code that depends on them.
+library rechaos-proto
+  default-language: GHC2021
+  hs-source-dirs:   generated
+  ghc-options:      -w
+  exposed-modules:
+    Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution
+    Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution_Fields
+    Proto.Build.Bazel.Semver.Semver
+    Proto.Build.Bazel.Semver.Semver_Fields
+    Proto.Google.Api.Annotations
+    Proto.Google.Api.Annotations_Fields
+    Proto.Google.Api.Client
+    Proto.Google.Api.Client_Fields
+    Proto.Google.Api.FieldBehavior
+    Proto.Google.Api.FieldBehavior_Fields
+    Proto.Google.Api.Http
+    Proto.Google.Api.Http_Fields
+    Proto.Google.Api.LaunchStage
+    Proto.Google.Api.LaunchStage_Fields
+    Proto.Google.Bytestream.Bytestream
+    Proto.Google.Bytestream.Bytestream_Fields
+    Proto.Google.Longrunning.Operations
+    Proto.Google.Longrunning.Operations_Fields
+    Proto.Google.Rpc.Status
+    Proto.Google.Rpc.Status_Fields
+
+  build-depends:
+    , base                      >=4.20 && <5
+    , proto-lens                >=0.7
+    , proto-lens-protobuf-types >=0.7
+    , proto-lens-runtime        >=0.7
+
+library
+  import:           warnings
+  hs-source-dirs:   src
+  default-extensions:
+    AllowAmbiguousTypes
+    DataKinds
+    FlexibleInstances
+    KindSignatures
+    TypeApplications
+    TypeFamilies
+
+  exposed-modules:
+    Rechaos.Core.Minimize
+    Rechaos.Core.Oracle
+    Rechaos.Core.Scheduler
+    Rechaos.Core.Types
+    Rechaos.Shell.Json
+    Rechaos.Shell.Minimize
+    Rechaos.Shell.Oracle
+    Rechaos.Shell.Protocol
+    Rechaos.Shell.Proxy
+    Rechaos.Shell.Runtime
+    Rechaos.Shell.Wire
+
+  build-depends:
+    , aeson          >=2.2
+    , async          >=2.2
+    , base           >=4.20 && <5
+    , bytestring     >=0.12
+    , containers     >=0.7
+    , crypton        >=1.0
+    , directory      >=1.3
+    , filepath       >=1.5
+    , grapesy        >=1.2.1
+    , lens           >=5.3
+    , memory         >=0.18
+    , network        >=3.2
+    , process        >=1.6
+    , proto-lens     >=0.7
+    , rechaos-proto
+    , temporary      >=1.3
+    , text           >=2.1
+    , unix           >=2.8
+
+executable rechaos
+  import:         warnings
+  hs-source-dirs: app
+  main-is:        Main.hs
+  ghc-options:    -threaded -rtsopts
+  build-depends:
+    , aeson                >=2.2
+    , base                 >=4.20 && <5
+    , bytestring           >=0.12
+    , directory            >=1.3
+    , filepath             >=1.5
+    , grapesy              >=1.2.1
+    , optparse-applicative >=0.18
+    , rechaos
+    , text                 >=2.1
+
+test-suite core
+  import:         warnings
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        CoreSpec.hs
+  build-depends:
+    , aeson       >=2.2
+    , base        >=4.20 && <5
+    , bytestring  >=0.12
+    , containers  >=0.7
+    , QuickCheck  >=2.15
+    , rechaos
+    , text        >=2.1

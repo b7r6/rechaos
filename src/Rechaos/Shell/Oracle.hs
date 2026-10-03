@@ -7,13 +7,14 @@
 -- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {-# LANGUAGE OverloadedStrings #-}
 
-module Rechaos.Shell.Oracle (snapshot, oracleJSON, compareTrees) where
+module Rechaos.Shell.Oracle (snapshot, oracleJSON, verdictJSON, putVerdict, compareTrees) where
 
 import Control.Exception (evaluate)
 import Control.Monad (forM, unless)
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (Value, encode, object, (.=))
 import Data.Bits ((.&.))
 import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteString.Lazy.Char8 as LC
 import Data.List (sort)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -64,6 +65,17 @@ snapshot root = do
       && fileMode a == fileMode b
       && modificationTimeHiRes a == modificationTimeHiRes b
       && statusChangeTimeHiRes a == statusChangeTimeHiRes b
+
+{- | A one-line machine-readable verdict object carrying a single label, e.g.
+@{"verdict":"valid"}@. Terminal subcommands emit this on stdout so results
+stay scriptable while human chatter goes to stderr.
+-}
+verdictJSON :: T.Text -> Value
+verdictJSON label = object ["verdict" .= label]
+
+-- | Emit a 'verdictJSON' label as a single line on stdout.
+putVerdict :: T.Text -> IO ()
+putVerdict = LC.putStrLn . encode . verdictJSON
 
 oracleJSON :: Verdict -> Value
 oracleJSON Equivalent = object ["verdict" .= ("equivalent" :: T.Text)]

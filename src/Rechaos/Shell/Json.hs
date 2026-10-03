@@ -176,20 +176,33 @@ instance FromJSON Decision where
 validatePolicy :: Policy -> Either Text ()
 validatePolicy = mapM_ (\r -> validFault (tMethod (target r)) (tDirection (target r)) (fault r)) . rules
 
+{- | The full fault-eligible REAPI surface. Delay and Abort operate on raw bytes
+and are legal on every method here; Truncate/Dribble stay restricted to the
+ByteStream streaming payloads (see 'validFault'). Keep these strings in lockstep
+with the proxy handlers in "Rechaos.Shell.Proxy".
+-}
+supportedMethods :: [Text]
+supportedMethods =
+  [ "google.bytestream.ByteStream/Read"
+  , "google.bytestream.ByteStream/Write"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchUpdateBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs"
+  , "build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree"
+  , "build.bazel.remote.execution.v2.ActionCache/GetActionResult"
+  , "build.bazel.remote.execution.v2.ActionCache/UpdateActionResult"
+  , "build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
+  ]
+
 validFault :: Text -> Direction -> Fault -> Either Text ()
 validFault method direction f
-  | method `notElem` supported = Left "policy targets an unsupported method"
+  | method `notElem` supportedMethods = Left "policy targets an unsupported method"
   | Truncate _ <- f, not streamPayload = Left "truncate requires Read response or Write request"
   | otherwise = Right ()
  where
   streamPayload =
     (method == "google.bytestream.ByteStream/Read" && direction == Response)
       || (method == "google.bytestream.ByteStream/Write" && direction == Request)
-  supported =
-    [ "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
-    , "google.bytestream.ByteStream/Read"
-    , "google.bytestream.ByteStream/Write"
-    ]
 
 readPolicy :: FilePath -> IO Policy
 readPolicy path = L.readFile path >>= either fail pure . eitherDecode

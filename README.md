@@ -64,6 +64,11 @@ one-file example. `version` and an explicit 64-bit `seed` are required. Targets
 use full `service/Method` names without a leading slash. Unknown JSON fields are
 errors.
 
+The authoritative references are [`docs/fault-dsl.md`](docs/fault-dsl.md) for the
+policy grammar, every field and constraint, and the exact decoder error strings,
+and [`docs/timeline-format.md`](docs/timeline-format.md) for the recorded
+timeline and `.outcomes.jsonl` on-disk schema.
+
 | Fault | Effect |
 |---|---|
 | `{"kind":"delay","micros":100000}` | Hold the selected message for 100 ms. |
@@ -71,12 +76,16 @@ errors.
 | `{"kind":"dribble","bytesPerSecond":65536,"chunkBytes":4096}` | Pace ByteStream payload chunks while preserving valid protobuf messages and Write offsets. |
 | `{"kind":"truncate","keepBytes":7}` | Keep N bytes of a Read response and end the stream with `OK`, or shorten a Write message and `finish_write`. |
 
-Fault selection is implemented for `FindMissingBlobs`, ByteStream `Read`, and
-ByteStream `Write`; the other REAPI methods pass through. Targets can constrain
-`direction`, `occurrence`, `messageIndex`, `minBlobBytes`, `maxBlobBytes`,
-`afterMicros`, and `beforeMicros`. The first matching rule owns the event; its
-`chancePpm` defaults to 1,000,000. Exactly one SplitMix64 step is consumed per
-observed message.
+Payload-rewriting faults (`truncate`, `dribble`) apply only to ByteStream `Read`
+responses and `Write` requests. The message-agnostic faults (`delay`, `abort`)
+apply to every supported method and direction; the supported-method allow-list in
+`validFault` is widening beyond `FindMissingBlobs`/`Read`/`Write` to cover the
+broader REAPI surface, so consult [`docs/fault-dsl.md`](docs/fault-dsl.md) for the
+exact set your build accepts. Methods outside the allow-list pass through. Targets
+can constrain `direction`, `occurrence`, `messageIndex`, `minBlobBytes`,
+`maxBlobBytes`, `afterMicros`, and `beforeMicros`. The first matching rule owns
+the event; its `chancePpm` defaults to 1,000,000. Exactly one SplitMix64 step is
+consumed per observed message.
 
 ## Replay, comparison, shrinking
 
@@ -106,6 +115,17 @@ divergence instead of guessing. The oracle compares relative paths, SHA256 file
 digests and sizes, executable bits, symlink targets, and directories, ignoring
 timestamps. The shrinker is deletion-1-minimal for a repeatable checker under the
 stated intensity steps.
+
+## Commands
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `serve` | Run the REAPI chaos gateway | `--upstream-host`, `--upstream-port`, `--host`, `--port`, `--policy`, `--replay`, `--sparse`, `--record`, `--max-call-seconds`, `--upstream-tls`, `--ca`, `--certificate`, `--key` |
+| `oracle` | Compare completed build output trees (exit 1 = divergence, 2 = error) | `CLEAN_TREE`, `CHAOS_TREE` |
+| `schedule` | Recompute decisions from a recorded event trace | `--policy`, `--trace`, `--output` |
+| `validate` | Validate a policy JSON file | `POLICY` |
+| `verify-replay` | Check every expected event was observed with matching fingerprints and faults | `EXPECTED_TIMELINE`, `OBSERVED_TIMELINE` |
+| `minimize` | Shrink a failure to a minimal witness under a repeatable checker | `--timeline`, `--output`, `--check`, `--signature`, `--repetitions`, `--trial-timeout`, `--max-trials` |
 
 ## Chaos monkey
 
@@ -144,6 +164,16 @@ contains no partial indexing, `error`, or `undefined`.
 | `Shell/Runtime` | Monotonic observations, occurrence allocation, journal writes |
 | `Shell/Wire`, `Protocol`, `Proxy` | grapesy server/client, pacing, stream edits, deadlines |
 | `Shell/Oracle`, `Shell/Minimize` | Filesystem snapshot + SHA256; external checker driver |
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `examples/` | `fault-policy.json`, the complete one-file policy example; `examples/chaos/*.json5`, NativeLink server configs for isolated local endpoints used in reproductions |
+| `scripts/` | `chaos-monkey.py`, build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
+| `reports/` | Dated investigation write-ups and their captured evidence under `reports/evidence/` |
+| `proto/` | Vendored `remote-apis` and `googleapis` protocol definitions with their licenses |
+| `docs/` | Reference docs: [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL) and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
 
 ## Develop
 

@@ -14,6 +14,7 @@ import Control.Exception
 import Control.Monad (unless, when)
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as L
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as T
 import qualified Network.GRPC.Client as C
 import Network.GRPC.Common (SslKeyLog (..), def)
@@ -31,6 +32,7 @@ import System.Directory (canonicalizePath, createDirectoryIfMissing)
 import System.Exit
 import System.FilePath (takeDirectory)
 import System.IO
+import System.IO.Error (ioeGetErrorString)
 
 data ServeOptions = ServeOptions
   { host :: String
@@ -55,17 +57,31 @@ data Command
   | Minimize FilePath FilePath String String Int Int Int
   | VerifyReplay FilePath FilePath
 
+-- Keep this literal in sync with the version in flake.nix / the cabal metadata.
+-- It is hardcoded here deliberately to avoid reading flake.nix at build time.
+versionString :: String
+versionString = "rechaos 0.1.0"
+
 optionString :: String -> String -> Parser String
 optionString name helpText = strOption (long name <> metavar "VALUE" <> help helpText)
 
 commandParser :: Parser Command
 commandParser =
   hsubparser
-    ( command' "serve" (Serve <$> serveOptions) "Run the REAPI chaos gateway"
+    ( command'
+        "serve"
+        (Serve <$> serveOptions)
+        ( "Run the REAPI chaos gateway. "
+            <> "Banners go to stderr. "
+            <> "Exit codes: 0 ok, 2 usage/IO error."
+        )
         <> command'
           "oracle"
           (Oracle <$> strArgument (metavar "CLEAN_TREE") <*> strArgument (metavar "CHAOS_TREE"))
-          "Compare completed build output trees (exit 1 = divergence, 2 = error)"
+          ( "Compare completed build output trees. "
+              <> "stdout: JSON verdict; stderr: chatter. "
+              <> "Exit codes: 0 equivalent, 1 divergence, 2 usage/IO error."
+          )
         <> command'
           "schedule"
           ( Schedule
@@ -73,15 +89,26 @@ commandParser =
               <*> optionString "trace" "Recorded JSONL events"
               <*> optionString "output" "Recomputed timeline JSONL"
           )
-          "Recompute decisions from a recorded event trace"
-        <> command' "validate" (Validate <$> strArgument (metavar "POLICY")) "Validate a policy"
+          ( "Recompute decisions from a recorded event trace. "
+              <> "Exit codes: 0 ok, 2 usage/IO error."
+          )
+        <> command'
+          "validate"
+          (Validate <$> strArgument (metavar "POLICY"))
+          ( "Validate a policy. "
+              <> "stdout: JSON verdict; stderr: chatter. "
+              <> "Exit codes: 0 valid, 2 invalid/IO error."
+          )
         <> command'
           "verify-replay"
           ( VerifyReplay
               <$> strArgument (metavar "EXPECTED_TIMELINE")
               <*> strArgument (metavar "OBSERVED_TIMELINE")
           )
-          "Check that all replay events were observed with matching fingerprints and faults"
+          ( "Check that all replay events were observed with matching fingerprints and faults. "
+              <> "stdout: JSON verdict; stderr: chatter. "
+              <> "Exit codes: 0 covered, 2 uncovered/IO error."
+          )
         <> command'
           "minimize"
           ( Minimize
@@ -89,22 +116,44 @@ commandParser =
               <*> optionString "output" "Minimized JSONL timeline"
               <*> optionString "check" "Shell command that reads RECHAOS_TIMELINE and writes RECHAOS_VERDICT"
               <*> optionString "signature" "Exact failure signature to preserve"
-              <*> option auto (long "repetitions" <> value 2 <> showDefault)
-              <*> option auto (long "trial-timeout" <> value 30 <> showDefault)
-              <*> option auto (long "max-trials" <> value 1000 <> showDefault)
+              <*> option auto (long "repetitions" <> metavar "N" <> value 2 <> showDefault)
+              <*> option auto (long "trial-timeout" <> metavar "SECONDS" <> value 30 <> showDefault)
+              <*> option auto (long "max-trials" <> metavar "N" <> value 1000 <> showDefault)
           )
-          "Shrink only on repeatedly confirmed matching failure signatures"
+          ( "Shrink only on repeatedly confirmed matching failure signatures. "
+              <> "Exit codes: 0 ok, 2 usage/IO error."
+          )
     )
  where
-  command' name parser desc = Options.Applicative.command name (info (parser <**> helper) (progDesc desc))
+  command' name parser desc = Options.Applicative.command name (info parser (progDesc desc))
 
 serveOptions :: Parser ServeOptions
 serveOptions =
   ServeOptions
-    <$> strOption (long "host" <> value "127.0.0.1" <> showDefault)
-    <*> option auto (long "port" <> value 50070 <> showDefault)
+    <$> strOption
+      ( long "host"
+          <> metavar "HOST"
+          <> value "127.0.0.1"
+          <> showDefault
+          <> help "Downstream listen address"
+      )
+    <*> option
+      auto
+      ( long "port"
+          <> metavar "PORT"
+          <> value 50070
+          <> showDefault
+          <> help "Downstream listen port"
+      )
     <*> optionString "upstream-host" "Upstream REAPI hostname"
-    <*> option auto (long "upstream-port" <> value 50051 <> showDefault)
+    <*> option
+      auto
+      ( long "upstream-port"
+          <> metavar "PORT"
+          <> value 50051
+          <> showDefault
+          <> help "Upstream REAPI port"
+      )
     <*> switch (long "upstream-tls" <> help "Verify upstream TLS using system trust or --ca")
     <*> optional (optionString "ca" "Upstream CA PEM file")
     <*> optional (optionString "certificate" "Downstream TLS certificate PEM")
@@ -126,25 +175,61 @@ serveOptions =
           <> help "Bound every RPC, including one without a client deadline"
       )
 
+versioner :: Parser (a -> a)
+versioner =
+  infoOption
+    versionString
+    (long "version" <> help "Show version and exit")
+
 main :: IO ()
-main =
-  ( execParser
-      ( info
-          (commandParser <**> helper)
-          (fullDesc <> progDesc "rechaos: black-box REAPI chaos and determinism checking")
-      )
-      >>= run
-  )
-    `catch` \e -> case fromException e :: Maybe ExitCode of
-      Just code -> exitWith code
-      Nothing -> hPutStrLn stderr (displayException (e :: SomeException)) >> exitWith (ExitFailure 2)
+main = (execParser opts >>= run) `catches` [Handler onExit, Handler onIO, Handler onError]
+ where
+  opts =
+    info
+      (commandParser <**> versioner <**> helper)
+      (fullDesc <> progDesc "rechaos: black-box REAPI chaos and determinism checking")
+  -- Let optparse-applicative's own exits (usage, --help, --version) pass through,
+  -- and preserve any ExitCode a subcommand raised (e.g. divergence = exit 1).
+  onExit :: ExitCode -> IO a
+  onExit = exitWith
+  -- IOExceptions (missing/unreadable files, bad ports) must never surface a
+  -- HasCallStack backtrace; print a clean one-liner and exit 2.
+  onIO :: IOException -> IO a
+  onIO = die' . ioeGetErrorString
+  -- A stray 'error'/'errorWithoutStackTrace' lands here; strip the backtrace.
+  onError :: ErrorCall -> IO a
+  onError e = die' (errorCallMessage e)
+  errorCallMessage (ErrorCallWithLocation msg _) = msg
+  die' :: String -> IO a
+  die' msg = hPutStrLn stderr ("rechaos: " ++ msg) >> exitWith (ExitFailure 2)
+
+-- Read a JSON input, qualifying any failure with the file path (and, where a
+-- command reads several inputs, the argument name) so diagnostics say exactly
+-- which file failed and why. Missing/unreadable files and strict-decode
+-- failures both arrive as IOExceptions (the latter via 'fail'); an 'error'
+-- would arrive as ErrorCall. Either becomes a single clean
+-- 'rechaos: <path>: <reason>' line through the top-level handler.
+withPath :: FilePath -> IO a -> IO a
+withPath path act = act `catches` [Handler rioe, Handler rerr]
+ where
+  rioe :: IOException -> IO a
+  rioe e = fail (path ++ ": " ++ ioeGetErrorString e)
+  rerr :: ErrorCall -> IO a
+  rerr e = fail (path ++ ": " ++ show e)
 
 run :: Command -> IO ()
-run (Validate path) = readPolicy path >> putStrLn "policy valid"
+run (Validate path) = do
+  _ <- withPath path (readPolicy path)
+  hPutStrLn stderr "policy valid"
+  putVerdict "valid"
 run (VerifyReplay expected observed) = do
-  a <- readTimeline expected
-  b <- readTimeline observed
-  either (fail . T.unpack) (const (putStrLn "replay coverage verified")) (verifyReplay a b)
+  a <- withPath ("expected timeline " ++ expected) (readTimeline expected)
+  b <- withPath ("observed timeline " ++ observed) (readTimeline observed)
+  case verifyReplay a b of
+    Left err -> fail (T.unpack err)
+    Right () -> do
+      hPutStrLn stderr "replay coverage verified"
+      putVerdict "covered"
 run (Minimize input output checker signature repetitions seconds trials) =
   minimizeTimeline input output checker (T.pack signature) repetitions seconds trials
 run (Oracle clean chaos) = do
@@ -155,25 +240,25 @@ run (Oracle clean chaos) = do
     O.Diverged _ -> exitWith (ExitFailure 1)
     O.Inconclusive -> exitWith (ExitFailure 2)
 run (Schedule policy trace output) = do
-  p <- readPolicy policy
-  ds <- readTimeline trace
+  p <- withPath ("policy " ++ policy) (readPolicy policy)
+  ds <- withPath ("trace " ++ trace) (readTimeline trace)
   writeTimeline output (schedule p (map event ds))
 run (Serve opts) = do
   unless (all (\n -> n > 0 && n <= 65535) [port opts, upstreamPort opts]) $
     fail "ports must be in 1..65535"
   unless (maxSeconds opts > 0 && maxSeconds opts <= 86400) $
     fail "max-call-seconds must be in 1..86400"
-  when (sparse opts && replayFile opts == Nothing) $ fail "--sparse requires --replay"
-  when (ca opts /= Nothing && not (tlsUpstream opts)) $ fail "--ca requires --upstream-tls"
-  when (policyFile opts /= Nothing && replayFile opts /= Nothing) $ fail "choose --policy or --replay"
-  p <- maybe (pure (Policy 0 [])) readPolicy (policyFile opts)
+  when (sparse opts && isNothing (replayFile opts)) $ fail "--sparse requires --replay"
+  when (isJust (ca opts) && not (tlsUpstream opts)) $ fail "--ca requires --upstream-tls"
+  when (isJust (policyFile opts) && isJust (replayFile opts)) $ fail "choose --policy or --replay"
+  p <- maybe (pure (Policy 0 [])) (\f -> withPath ("policy " ++ f) (readPolicy f)) (policyFile opts)
   replay <-
     traverse
       ( \file -> do
           a <- canonicalizePath file
           b <- canonicalizePath (record opts)
           when (a == b) $ fail "record path must differ from replay path"
-          ds <- readTimeline file
+          ds <- withPath ("replay " ++ file) (readTimeline file)
           pure (sparse opts, ds)
       )
       (replayFile opts)

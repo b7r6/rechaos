@@ -7,6 +7,17 @@
 - ignore: { name: "Avoid lambda" }
 - ignore: { name: "Use <$>" }
 
+# Property assertions read clearer in explicit form; hlint idiom hints here are
+# advisory, not failures. The hard gates are -Wall and fourmolu.
+- ignore: { name: "Hoist not" }
+- ignore: { name: "Use null" }
+- ignore: { name: "Use isNothing" }
+- ignore: { name: "Use isJust" }
+- ignore: { name: "Use when" }
+- ignore: { name: "Use lambda-case" }
+- ignore: { name: "Functor law" }
+- ignore: { name: "Unused LANGUAGE pragma" }
+
 # Keep partial functions out of the pure core.
 - functions:
     - { name: head, within: [] }

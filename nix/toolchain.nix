@@ -26,8 +26,16 @@ let
         })
       ) (builtins.removeAttrs pins ["random"]);
   };
-in hp.ghcWithPackages (h: [
-  h.grapesy h.proto-lens h.proto-lens-runtime h.proto-lens-protobuf-types
-  h.proto-lens-protoc h.aeson h.async h.crypton h.memory h.lens
-  h.QuickCheck h.optparse-applicative h.temporary
-])
+  ghc = hp.ghcWithPackages (h: [
+    h.grapesy h.proto-lens h.proto-lens-runtime h.proto-lens-protobuf-types
+    h.proto-lens-protoc h.aeson h.async h.crypton h.memory h.lens
+    h.QuickCheck h.optparse-applicative h.temporary
+  ]);
+in {
+  # The overridden Haskell package set (pinned grapesy/http2/tls closure) used
+  # to build the rechaos.cabal package via callCabal2nix.
+  inherit hp;
+  # A bare ghc with every runtime dependency in its package database, for the
+  # hand-driven ghc --make path in scripts/build.sh and the dev shell.
+  inherit ghc;
+}
