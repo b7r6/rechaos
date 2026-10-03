@@ -67,6 +67,9 @@ inductive Fault
     dribble (bytesPerSecond : Nat) (chunkBytes : Nat)
   | /-- Truncate the payload, keeping only the leading `keepBytes` bytes. -/
     truncate (keepBytes : Nat)
+  | /-- Corrupt the payload in place, flipping the low bit of each of the leading
+        `bytes` payload bytes. Length-preserving, unlike `truncate`. -/
+    corrupt (bytes : Nat)
   deriving Repr, DecidableEq, Inhabited
 
 /-- A predicate over `Event`s selecting where a `Rule` applies. Absent optional

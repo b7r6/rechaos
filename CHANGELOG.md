@@ -6,8 +6,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- REAPI chaos gateway (`rechaos serve`): delay / abort / dribble / truncate faults
-  over a strict, versioned policy DSL, with deterministic replay.
+- REAPI chaos gateway (`rechaos serve`): delay / abort / dribble / truncate /
+  corrupt faults over a strict, versioned policy DSL, with deterministic replay.
+- `corrupt` fault (`{"kind":"corrupt","bytes":N}`): a length-preserving
+  payload-rewriting fault that flips the low bit of the first N bytes of a
+  ByteStream Read response or Write request, forcing the server to re-hash the
+  content to detect tampering (a strictly harder integrity test than `truncate`).
+  Mirrored into the Lean model and the Haskell<->Lean differential corpora.
 - Pure Haskell core: SplitMix64 scheduler, first-match targeting, replay
   identity/fingerprint/coverage checks, output-tree oracle, witness-preserving
   minimizer.

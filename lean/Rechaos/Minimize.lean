@@ -53,8 +53,9 @@ structure ShrinkState where
     Each step moves along a finite, decreasing measure toward the event's natural
     bound: `delay` halves toward zero, `dribble` doubles its rate toward the
     message's full-speed cap (`messageBytes * microsPerSecond`, the rate that
-    delivers the whole message in one microsecond), and `truncate` raises its
-    kept-byte count toward the full message size. `abort` has no weaker form.
+    delivers the whole message in one microsecond), `truncate` raises its
+    kept-byte count toward the full message size, and `corrupt` halves its
+    corrupted-byte count toward one. `abort` has no weaker form.
     Mirrors the Haskell `weaker`. -/
 def weaker (anchor : Event) : Fault → List Fault
   | .delay micros => if micros > 0 then [.delay (micros / 2)] else []
@@ -64,6 +65,7 @@ def weaker (anchor : Event) : Fault → List Fault
   | .truncate keep =>
       let cap := anchor.messageBytes
       if keep < cap then [.truncate (keep + Nat.max 1 ((cap - keep) / 2))] else []
+  | .corrupt n => if n > 1 then [.corrupt (n / 2)] else []
   | .abort _ => []
 
 /-- The halving chunk sizes a deletion pass sweeps over: `n`, then `n/2`, …, down
@@ -156,11 +158,13 @@ def observe (verdict : MinimizeVerdict) (state : ShrinkState) : ShrinkState :=
     `(length, summed-severity)` measure's intensity component, decreasing exactly
     when `weaker` fires. `delay` is its own micros; `truncate` is how many bytes
     it drops below the full message; `dribble` is how far its rate sits below the
-    full-speed cap; `abort` has no intensity. -/
+    full-speed cap; `corrupt` is its corrupted-byte count; `abort` has no
+    intensity. -/
 def severity (anchor : Event) : Fault → Nat
   | .delay micros => micros
   | .abort _ => 0
   | .truncate keep => anchor.messageBytes - Nat.min anchor.messageBytes keep
+  | .corrupt n => n
   | .dribble rate _ =>
       let cap := Nat.max 1 (anchor.messageBytes * microsPerSecond)
       cap - Nat.min cap rate
@@ -231,6 +235,14 @@ theorem weaker_severity_lt
         rw [hkeep, hnew]
         omega
       · simp only [hlt, if_false, List.not_mem_nil] at hmem
+  | corrupt n =>
+      simp only [weaker] at hmem
+      by_cases hgt : n > 1
+      · simp only [hgt, if_true, List.mem_singleton] at hmem
+        subst hmem
+        simp only [severity]
+        omega
+      · simp only [hgt, if_false, List.not_mem_nil] at hmem
   | dribble rate chunk =>
       simp only [weaker] at hmem
       by_cases hlt : rate < Nat.max 1 (anchor.messageBytes * microsPerSecond)

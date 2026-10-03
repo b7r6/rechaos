@@ -14,8 +14,9 @@ This module reads just enough of each RPC's protobuf payload to drive fault
 injection without owning a full schema. It recovers blob and message sizes in
 bytes ('blobSize', 'messageSize'), computes the SHA-256 payload fingerprint the
 timeline records ('sha256'), and rewrites targeted messages when a fault fires:
-'payloadChunks' performs dribble re-chunking at protobuf message boundaries and
-'truncatePayload' clips a payload to its first @keepBytes@. The exported method
+'payloadChunks' performs dribble re-chunking at protobuf message boundaries,
+'truncatePayload' clips a payload to its first @keepBytes@, and 'corruptPayload'
+flips the low bit of the leading bytes in place (length-preserving). The exported method
 constant strings ('readMethod', 'writeMethod', 'missingMethod') name the
 ByteStream and CAS methods the proxy special-cases. It is cited by
 @docs/ARCHITECTURE.md@.
@@ -31,6 +32,7 @@ module Rechaos.Shell.Protocol (
   -- * Stream edits
   payloadChunks,
   truncatePayload,
+  corruptPayload,
 
   -- * Method names
   readMethod,
@@ -40,12 +42,14 @@ module Rechaos.Shell.Protocol (
 
 import Control.Lens ((&), (.~), (^.))
 import Crypto.Hash (Digest, SHA256, hashlazy)
+import Data.Bits (xor)
 import Data.ByteString qualified as B
 import Data.ByteString.Lazy qualified as L
 import Data.Int (Int64)
 import Data.ProtoLens (Message, decodeMessage, encodeMessage)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word8)
 import Numeric.Natural (Natural)
 import Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution qualified as RE
 import Proto.Build.Bazel.Remote.Execution.V2.RemoteExecution_Fields qualified as R
@@ -250,3 +254,26 @@ truncatePayload method direction keep bytes
   | otherwise = Left "truncate unsupported at this event"
  where
   takeBytes b = B.take (fromIntegral (min keep (fromIntegral (B.length b)))) b
+
+{- | Corrupt a rewritable payload in place, flipping the low bit of each of the
+leading @bytes@ bytes of the @data@ field and re-encoding the message. Unlike
+'truncatePayload' this is length-preserving: the @data@ field keeps its exact
+size (and a @Write@ keeps its @finish_write@ flag), so a server that trusts the
+declared length sees no shortfall and must re-hash the content to detect the
+tampering. Messages of any other shape are not rewritable here and yield a
+'Left' rather than being altered.
+-}
+corruptPayload :: Text -> Direction -> Natural -> L.ByteString -> Either String L.ByteString
+corruptPayload method direction count bytes
+  | method == readMethod && direction == Response = do
+      msg <- decode bytes :: Either String BS.ReadResponse
+      pure (encode (msg & F.data' .~ flipBytes (msg ^. F.data')))
+  | method == writeMethod && direction == Request = do
+      msg <- decode bytes :: Either String BS.WriteRequest
+      pure (encode (msg & F.data' .~ flipBytes (msg ^. F.data')))
+  | otherwise = Left "corrupt unsupported at this event"
+ where
+  n = fromIntegral (min count (fromIntegral (maxBound :: Int))) :: Int
+  flipBytes b =
+    let (prefix, suffix) = B.splitAt n b
+     in B.map (`xor` (1 :: Word8)) prefix `B.append` suffix

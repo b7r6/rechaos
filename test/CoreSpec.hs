@@ -82,10 +82,11 @@ instance Arbitrary Fault where
           <$> (fromIntegral . getPositive <$> (arbitrary :: Gen (Positive Int)))
           <*> (fromIntegral <$> chooseInt (1, 4194304))
       , Truncate <$> natural
+      , Corrupt <$> natural
       ]
 
 -- A fault paired with a target method/direction on which validFault accepts it.
--- Truncate is only emitted against a stream-payload target.
+-- Truncate and Corrupt are only emitted against a stream-payload target.
 arbitraryFaultAndTarget :: Gen (Fault, T.Text, Direction)
 arbitraryFaultAndTarget =
   oneof
@@ -98,6 +99,10 @@ arbitraryFaultAndTarget =
         keep <- natural
         (m, d) <- streamPayloadTarget
         pure (Truncate keep, m, d)
+    , do
+        n <- natural
+        (m, d) <- streamPayloadTarget
+        pure (Corrupt n, m, d)
     ]
  where
   dribbleGen =
@@ -300,6 +305,11 @@ main = do
   check "Dribble minimization shrinks toward the failing threshold" $
     let ds = [Decision (eventAt 1) (Just (Dribble 1 16))]
         triggers = any (\d -> case injection d of Just (Dribble rate _) -> rate < 1000; _ -> False)
+        result = minimize triggers 200 (Min.start ds)
+     in triggers result && all (not . triggers) (Min.candidates result)
+  check "Corrupt minimization shrinks toward the failing threshold" $
+    let ds = [Decision (eventAt 1) (Just (Corrupt 64))]
+        triggers = any (\d -> case injection d of Just (Corrupt n) -> n > 4; _ -> False)
         result = minimize triggers 200 (Min.start ds)
      in triggers result && all (not . triggers) (Min.candidates result)
   check "candidate generation produces no intensity variant at the Truncate and Dribble caps" $
@@ -638,6 +648,7 @@ main = do
     , Rule targetAll 250000 (Abort Internal)
     , Rule targetAll 100000 (Dribble 1024 16)
     , Rule targetAll 750000 (Truncate 64)
+    , Rule targetAll 600000 (Corrupt 8)
     ]
   -- ── reference-leads scheduler corpora (kept byte-identical to the shapes
   --    scripts/gen-conformance.hs emits; regenerate both via that script) ──────
@@ -701,6 +712,7 @@ main = do
     jsonFault (Just (Dribble rate chunk)) =
       LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
     jsonFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
+    jsonFault (Just (Corrupt n)) = LC.pack ("{\"corrupt\":" ++ show n ++ "}")
   -- ── reference-leads oracle corpus (kept byte-identical to the shape
   --    scripts/gen-conformance.hs emits; regenerate both via that script) ───────
   -- The (treeA, treeB) scope the oracle differential is probed on: identity,
@@ -815,10 +827,14 @@ main = do
     , [minimizeDecision 1 (Just (Truncate 0))]
     , [minimizeDecision 1 (Just (Truncate 63))]
     , [minimizeDecision 1 (Just (Truncate 64))]
+    , [minimizeDecision 1 (Just (Corrupt 0))]
+    , [minimizeDecision 1 (Just (Corrupt 1))]
+    , [minimizeDecision 1 (Just (Corrupt 7))]
     , [minimizeDecision 1 (Just (Dribble 1 16))]
     , [minimizeDecision 1 (Just (Dribble (64 * 1000000) 16))]
     , [minimizeDecision 1 (Just (Abort Internal))]
     , [minimizeDecision 1 (Just (Delay 4)), minimizeDecision 2 (Just (Truncate 10))]
+    , [minimizeDecision 1 (Just (Delay 4)), minimizeDecision 2 (Just (Corrupt 6))]
     ,
       [ minimizeDecision 1 (Just (Delay 4))
       , minimizeDecision 2 Nothing
@@ -915,6 +931,7 @@ main = do
     jsonMinFault (Just (Dribble rate chunk)) =
       LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
     jsonMinFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
+    jsonMinFault (Just (Corrupt n)) = LC.pack ("{\"corrupt\":" ++ show n ++ "}")
   -- ── reference-leads replay corpus (kept byte-identical to the shape
   --    scripts/gen-conformance.hs emits; regenerate both via that script) ───────
   -- A fixed anchor event the replay timelines hang their decisions on, keyed by
@@ -1038,6 +1055,7 @@ main = do
     jsonReplayFault (Just (Dribble rate chunk)) =
       LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
     jsonReplayFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
+    jsonReplayFault (Just (Corrupt n)) = LC.pack ("{\"corrupt\":" ++ show n ++ "}")
   isRight (Right _) = True
   isRight _ = False
   -- All but the last element; total (empty on lists of length < 2).
@@ -1111,9 +1129,10 @@ main = do
     | (i, x) <- zip [1 :: Int ..] fs
     ]
   faultFrom :: Int -> Fault
-  faultFrom x = case (abs x `mod` 3, fromIntegral (abs x `mod` 90) :: Natural) of
+  faultFrom x = case (abs x `mod` 4, fromIntegral (abs x `mod` 90) :: Natural) of
     (0, n) -> Delay n
     (1, n) -> Truncate n
+    (2, n) -> Corrupt n
     (_, n) -> Dribble (n + 1) 16
   -- Termination measure: length first, then summed severity. Every weaker variant
   -- lowers severity, so Min.candidates must be strictly smaller in this order.
@@ -1123,6 +1142,7 @@ main = do
   severity _ (Delay n) = n
   severity _ (Abort _) = 0
   severity e (Truncate keep) = eMessageBytes e - min (eMessageBytes e) keep
+  severity _ (Corrupt n) = n
   severity e (Dribble rate _) =
     let cap = max 1 (eMessageBytes e * 1000000) in cap - min cap rate
   -- (C) deterministic ppm band: the observed fire fraction over a fixed stream.

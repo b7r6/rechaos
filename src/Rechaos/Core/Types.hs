@@ -151,6 +151,12 @@ data Fault
     Dribble Natural Natural
   | -- | Truncate the payload, keeping only the leading @keepBytes@ bytes.
     Truncate Natural
+  | {- | Corrupt the payload in place, flipping the low bit of each of the
+    leading @bytes@ payload bytes. Length-preserving (unlike 'Truncate'): the
+    message keeps its exact size, so the server must re-hash the content to
+    detect the tampering rather than noticing a short read.
+    -}
+    Corrupt Natural
   deriving (Eq, Show)
 
 {- | A predicate over 'Event's selecting where a 'Rule' applies. All optional

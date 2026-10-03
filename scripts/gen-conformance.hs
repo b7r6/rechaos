@@ -254,10 +254,11 @@ minimizeDecision :: Natural -> Maybe Fault -> Decision
 minimizeDecision i = Decision (minimizeEvent i)
 
 -- A scope of timelines spanning: empty, single faults of every intensity-bearing
--- constructor (Delay, Truncate, Dribble) at interior and boundary values, Abort
--- (no weaker form), a mixed multi-fault timeline, and timelines with passthrough
--- (Nothing) decisions interleaved — so `candidates` is probed on deletion halving,
--- singleton deletion, and every `weaker` branch, including the no-op caps.
+-- constructor (Delay, Truncate, Corrupt, Dribble) at interior and boundary values,
+-- Abort (no weaker form), a mixed multi-fault timeline, and timelines with
+-- passthrough (Nothing) decisions interleaved — so `candidates` is probed on
+-- deletion halving, singleton deletion, and every `weaker` branch, including the
+-- no-op caps (Corrupt's floor at 1).
 minimizeScope :: [Timeline]
 minimizeScope =
   [ []
@@ -267,10 +268,14 @@ minimizeScope =
   , [minimizeDecision 1 (Just (Truncate 0))]
   , [minimizeDecision 1 (Just (Truncate 63))]
   , [minimizeDecision 1 (Just (Truncate 64))]
+  , [minimizeDecision 1 (Just (Corrupt 0))]
+  , [minimizeDecision 1 (Just (Corrupt 1))]
+  , [minimizeDecision 1 (Just (Corrupt 7))]
   , [minimizeDecision 1 (Just (Dribble 1 16))]
   , [minimizeDecision 1 (Just (Dribble (64 * microsPerSecond) 16))]
   , [minimizeDecision 1 (Just (Abort Internal))]
   , [minimizeDecision 1 (Just (Delay 4)), minimizeDecision 2 (Just (Truncate 10))]
+  , [minimizeDecision 1 (Just (Delay 4)), minimizeDecision 2 (Just (Corrupt 6))]
   ,
     [ minimizeDecision 1 (Just (Delay 4))
     , minimizeDecision 2 Nothing
@@ -494,6 +499,7 @@ leanFault (Delay n) = "(Fault.delay " ++ leanNat n ++ ")"
 leanFault (Abort st) = "(Fault.abort " ++ leanStatus st ++ ")"
 leanFault (Dribble rate chunk) = "(Fault.dribble " ++ leanNat rate ++ " " ++ leanNat chunk ++ ")"
 leanFault (Truncate keep) = "(Fault.truncate " ++ leanNat keep ++ ")"
+leanFault (Corrupt n) = "(Fault.corrupt " ++ leanNat n ++ ")"
 
 leanOptFault :: Maybe Fault -> String
 leanOptFault Nothing = "none"
@@ -764,6 +770,7 @@ jsonMinFault (Just (Abort st)) = "{\"abort\":" ++ show (statusCode st) ++ "}"
 jsonMinFault (Just (Dribble rate chunk)) =
   "{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}"
 jsonMinFault (Just (Truncate keep)) = "{\"truncate\":" ++ show keep ++ "}"
+jsonMinFault (Just (Corrupt n)) = "{\"corrupt\":" ++ show n ++ "}"
 
 -- A timeline as a JSON array of per-decision [occurrence, injection] pairs. The
 -- occurrence pins which anchor event each decision sits on, so the golden captures
@@ -808,6 +815,7 @@ jsonReplayFault (Just (Abort st)) = "{\"abort\":" ++ show (statusCode st) ++ "}"
 jsonReplayFault (Just (Dribble rate chunk)) =
   "{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}"
 jsonReplayFault (Just (Truncate keep)) = "{\"truncate\":" ++ show keep ++ "}"
+jsonReplayFault (Just (Corrupt n)) = "{\"corrupt\":" ++ show n ++ "}"
 
 -- A decision as compact JSON capturing its event identity, fingerprint-significant
 -- payload hash, arrival time, and injection — enough to reproduce every replay
@@ -949,6 +957,7 @@ main = do
   jsonFaultValue (Dribble rate chunk) =
     "{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}"
   jsonFaultValue (Truncate keep) = "{\"truncate\":" ++ show keep ++ "}"
+  jsonFaultValue (Corrupt n) = "{\"corrupt\":" ++ show n ++ "}"
   -- ── scheduler corpus Lean file ─────────────────────────────────────────────
   gateScopeLines = case gateRows of
     [] -> ["  []"]

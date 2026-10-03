@@ -52,6 +52,7 @@ instance ToJSON Fault where
   toJSON (Abort s) = object ["kind" .= String "abort", "status" .= s]
   toJSON (Dribble r c) = object ["kind" .= String "dribble", "bytesPerSecond" .= r, "chunkBytes" .= c]
   toJSON (Truncate n) = object ["kind" .= String "truncate", "keepBytes" .= n]
+  toJSON (Corrupt n) = object ["kind" .= String "corrupt", "bytes" .= n]
 instance FromJSON Fault where
   parseJSON = withObject "fault" $ \o -> do
     kind <- o .: "kind" :: Parser Text
@@ -66,6 +67,7 @@ instance FromJSON Fault where
           fail "dribble requires positive rate and chunkBytes in 1..4194304"
         pure (Dribble r c)
       "truncate" -> onlyKeys ["kind", "keepBytes"] o >> Truncate <$> o .: "keepBytes"
+      "corrupt" -> onlyKeys ["kind", "bytes"] o >> Corrupt <$> o .: "bytes"
       _ -> fail "unknown fault kind"
 instance ToJSON Target where
   toJSON t =
@@ -180,9 +182,9 @@ validatePolicy = mapM_ (\r -> validFault (tMethod (target r)) (tDirection (targe
 
 {- | The full fault-eligible REAPI surface and the canonical source of truth for
 policy targeting. 'Delay' and 'Abort' operate on raw bytes and are legal on
-every method here; the payload-rewriting faults ('Truncate' and 'Dribble', see
-'payloadRewriting') stay restricted to the ByteStream streaming payloads (see
-'validFault').
+every method here; the payload-rewriting faults ('Truncate', 'Corrupt' and
+'Dribble', see 'payloadRewriting') stay restricted to the ByteStream streaming
+payloads (see 'validFault').
 
 Keep these strings in lockstep with the proxy handlers in "Rechaos.Shell.Proxy".
 The proxy forwards additional long-running methods (notably the
@@ -215,15 +217,29 @@ and 'Abort' are message-agnostic and are /not/ payload-rewriting.
 -}
 payloadRewriting :: Fault -> Bool
 payloadRewriting Truncate{} = True
+payloadRewriting Corrupt{} = True
 payloadRewriting Dribble{} = True
 payloadRewriting Delay{} = False
 payloadRewriting Abort{} = False
+
+{- | Payload-rewriting faults that require a decodable streaming payload to edit:
+'Truncate' and 'Corrupt' rewrite the ByteStream 'Read' response / 'Write'
+request @data@ field, so they are rejected anywhere else. 'Dribble' re-chunks
+and so remains legal on every supported method (it paces a unary message as a
+single chunk), and 'Delay'/'Abort' are message-agnostic.
+-}
+streamPayloadOnly :: Fault -> Bool
+streamPayloadOnly Truncate{} = True
+streamPayloadOnly Corrupt{} = True
+streamPayloadOnly Dribble{} = False
+streamPayloadOnly Delay{} = False
+streamPayloadOnly Abort{} = False
 
 validFault :: Text -> Direction -> Fault -> Either Text ()
 validFault method direction f
   | method `notElem` supportedMethods =
       Left ("policy targets an unsupported method: " <> method)
-  | Truncate{} <- f
+  | streamPayloadOnly f
   , not streamPayload =
       Left (faultName f <> " requires a ByteStream Read response or Write request")
   | otherwise = Right ()
@@ -232,6 +248,7 @@ validFault method direction f
     (method == "google.bytestream.ByteStream/Read" && direction == Response)
       || (method == "google.bytestream.ByteStream/Write" && direction == Request)
   faultName Truncate{} = "truncate"
+  faultName Corrupt{} = "corrupt"
   faultName Dribble{} = "dribble"
   faultName Delay{} = "delay"
   faultName Abort{} = "abort"

@@ -184,6 +184,25 @@ stream with `OK`, or shortens a ByteStream Write message and sets
 `finish_write`. Truncate is only valid on the ByteStream payload directions (see
 matrix).
 
+### corrupt
+
+```json
+{"kind": "corrupt", "bytes": 4}
+```
+
+| Field | Type | Unit | Range | Required |
+|---|---|---|---|---|
+| `kind` | string | — | `"corrupt"` | yes |
+| `bytes` | integer | bytes | `>= 0` | yes |
+
+Flips the low bit of each of the first `bytes` bytes of a ByteStream Read
+response or Write request `data` field, re-encoding the message. Unlike
+`truncate`, corrupt is **length-preserving**: the payload keeps its exact size
+(and a Write keeps its `finish_write` flag), so a server that only checks the
+declared length sees no shortfall and must re-hash the content to detect the
+tampering — a strictly harder integrity test. Corrupt is only valid on the
+ByteStream payload directions (see matrix).
+
 ## Method x direction x fault compatibility
 
 Validity is enforced twice from the same rule, both by `validFault`: once on the
@@ -221,45 +240,50 @@ ByteStream payloads, so size targeting and payload rewriting are meaningless).
 
 ### Fault eligibility
 
-`validFault` enforces exactly one restriction, and it applies to `Truncate` only:
+`validFault` enforces exactly one restriction, and it applies to the
+payload-rewriting faults `Truncate` and `Corrupt`:
 
 - **Delay, Abort, and Dribble** are legal on **every** supported method and
   **either** direction. Delay and Abort are message-agnostic. Dribble paces
   payload delivery: on a streaming payload direction it re-chunks the bytes; on a
   unary message it paces the whole message as a single chunk. Nothing in
   `validFault` restricts these beyond the supported-method check above.
-- **Truncate** shortens a payload, which only makes sense mid-stream, so
-  `validFault` rejects it anywhere outside the two ByteStream payload directions
-  (`truncate requires Read response or Write request`):
+- **Truncate** shortens a payload and **Corrupt** rewrites its leading bytes in
+  place; both only make sense where rechaos can decode, edit, and re-encode the
+  streaming payload, so `validFault` rejects either anywhere outside the two
+  ByteStream payload directions (`truncate`/`corrupt`
+  `requires a ByteStream Read response or Write request`):
   - ByteStream `Read` with `direction: "response"`
   - ByteStream `Write` with `direction: "request"`
 
 ### Eligibility matrix
 
-Columns are the four faults crossed with each supported method's two directions.
+Columns are the five faults crossed with each supported method's two directions.
 A cell is **legal** (the combination is eligible and takes effect) or **rejected**
 (`validFault` fails the policy / replay line).
 
-| Method | Direction | Delay | Abort | Dribble | Truncate |
-|---|---|---|---|---|---|
-| `ByteStream/Read` | request | legal | legal | legal | rejected |
-| `ByteStream/Read` | response | legal | legal | legal | legal |
-| `ByteStream/Write` | request | legal | legal | legal | legal |
-| `ByteStream/Write` | response | legal | legal | legal | rejected |
-| `ContentAddressableStorage/FindMissingBlobs` | request / response | legal | legal | legal | rejected |
-| `ContentAddressableStorage/BatchUpdateBlobs` | request / response | legal | legal | legal | rejected |
-| `ContentAddressableStorage/BatchReadBlobs` | request / response | legal | legal | legal | rejected |
-| `ContentAddressableStorage/GetTree` | request / response | legal | legal | legal | rejected |
-| `ActionCache/GetActionResult` | request / response | legal | legal | legal | rejected |
-| `ActionCache/UpdateActionResult` | request / response | legal | legal | legal | rejected |
-| `Capabilities/GetCapabilities` | request / response | legal | legal | legal | rejected |
-| *any method not in the allow-list* | request / response | rejected | rejected | rejected | rejected |
+| Method | Direction | Delay | Abort | Dribble | Truncate | Corrupt |
+|---|---|---|---|---|---|---|
+| `ByteStream/Read` | request | legal | legal | legal | rejected | rejected |
+| `ByteStream/Read` | response | legal | legal | legal | legal | legal |
+| `ByteStream/Write` | request | legal | legal | legal | legal | legal |
+| `ByteStream/Write` | response | legal | legal | legal | rejected | rejected |
+| `ContentAddressableStorage/FindMissingBlobs` | request / response | legal | legal | legal | rejected | rejected |
+| `ContentAddressableStorage/BatchUpdateBlobs` | request / response | legal | legal | legal | rejected | rejected |
+| `ContentAddressableStorage/BatchReadBlobs` | request / response | legal | legal | legal | rejected | rejected |
+| `ContentAddressableStorage/GetTree` | request / response | legal | legal | legal | rejected | rejected |
+| `ActionCache/GetActionResult` | request / response | legal | legal | legal | rejected | rejected |
+| `ActionCache/UpdateActionResult` | request / response | legal | legal | legal | rejected | rejected |
+| `Capabilities/GetCapabilities` | request / response | legal | legal | legal | rejected | rejected |
+| *any method not in the allow-list* | request / response | rejected | rejected | rejected | rejected | rejected |
 
 Reading the matrix:
 
-- **Truncate** is `rejected` by `validFault` on everything except ByteStream Read
-  response and ByteStream Write request — it is the only fault with an explicit
-  per-direction rejection rule.
+- **Truncate** and **Corrupt** are `rejected` by `validFault` on everything
+  except ByteStream Read response and ByteStream Write request — they are the
+  payload-rewriting faults, the only ones with an explicit per-direction
+  rejection rule. Truncate shortens the payload; Corrupt rewrites its leading
+  bytes in place, length-preserving.
 - **Dribble** paces payload delivery: it re-chunks a streamed payload on the two
   ByteStream payload directions, and paces any other (unary) message as a single
   whole-message chunk — so it is `legal` on every method in the allow-list.
@@ -269,7 +293,8 @@ Reading the matrix:
 
 The decoder echoes the offending method/field in its errors: an unsupported
 method fails with `policy targets an unsupported method`, and an out-of-place
-`truncate` fails with `truncate requires Read response or Write request`, so a
+`truncate` or `corrupt` fails with
+`<kind> requires a ByteStream Read response or Write request`, so a
 rejected cell names exactly why it was rejected.
 
 ## Selection scope
@@ -301,9 +326,10 @@ The decoder fails closed with these exact strings:
 | Inverted blob-bytes or micros range | `inverted target range` |
 | `dribble` with zero rate, zero chunk, or chunk > 4 MiB | `dribble requires positive rate and chunkBytes in 1..4194304` |
 | Target names an unsupported method | `policy targets an unsupported method` |
-| `truncate` on a non-ByteStream-payload target | `truncate requires Read response or Write request` |
+| `truncate` on a non-ByteStream-payload target | `truncate requires a ByteStream Read response or Write request` |
+| `corrupt` on a non-ByteStream-payload target | `corrupt requires a ByteStream Read response or Write request` |
 
-The policy-level checks (`unsupported method`, `truncate` target) run through
+The policy-level checks (`unsupported method`, `truncate`/`corrupt` target) run through
 `validatePolicy`, which validates every rule's method/direction/fault
 combination before the gateway starts. The same `validFault` check runs again
 per decision during replay, so a hand-edited timeline that injects an illegal

@@ -115,8 +115,9 @@ candidates xs = nub (deletions ++ intensities)
   Each step moves along a finite, decreasing measure toward the event's natural
   bound: 'Delay' halves toward zero, 'Dribble' doubles its rate toward the
   message's full-speed cap (@messageBytes * 'microsPerSecond'@, the rate that
-  delivers the whole message in one microsecond), and 'Truncate' raises its
-  kept-byte count toward the full message size. 'Abort' has no weaker form.
+  delivers the whole message in one microsecond), 'Truncate' raises its
+  kept-byte count toward the full message size, and 'Corrupt' halves its
+  corrupted-byte count toward one. 'Abort' has no weaker form.
 -}
 weaker :: Event -> Fault -> [Fault]
 weaker _ (Delay n) = [Delay (n `div` 2) | n > 0]
@@ -129,4 +130,5 @@ weaker e (Truncate keep) =
  where
   cap :: Natural
   cap = eMessageBytes e
+weaker _ (Corrupt n) = [Corrupt (n `div` 2) | n > 1]
 weaker _ (Abort _) = []

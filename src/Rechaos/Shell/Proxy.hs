@@ -13,7 +13,7 @@
 
 {- | The faulting gRPC gateway: a transparent proxy that pumps each RPC between
 a downstream client and the real upstream server, consulting the 'Runtime' at
-every message to decide whether to delay, abort, dribble, or truncate it.
+every message to decide whether to delay, abort, dribble, truncate, or corrupt it.
 
 This module is in the IO shell. It owns all transport effects -- pacing,
 stream editing, deadlines, metadata forwarding, and cancellation -- and defers
@@ -120,6 +120,13 @@ handler runtime connection maxSeconds = S.someRpcHandler $
                       (truncatePayload method direction keep bytes)
                   _ <- send shortened
                   pure True
+                Just (Corrupt count) -> do
+                  corrupted <-
+                    either
+                      (throwIO . grpcException GrpcInvalidArgument . T.pack)
+                      pure
+                      (corruptPayload method direction count bytes)
+                  send corrupted >> pure False
             pumpInput index = do
               item <- S.recvInput downstream
               case item of

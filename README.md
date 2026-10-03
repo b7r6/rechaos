@@ -78,9 +78,12 @@ timeline and `.outcomes.jsonl` on-disk schema.
 | `{"kind":"abort","status":"Unavailable"}` | End the selected RPC with that gRPC error. |
 | `{"kind":"dribble","bytesPerSecond":65536,"chunkBytes":4096}` | Pace ByteStream payload chunks while preserving valid protobuf messages and Write offsets. |
 | `{"kind":"truncate","keepBytes":7}` | Keep N bytes of a Read response and end the stream with `OK`, or shorten a Write message and `finish_write`. |
+| `{"kind":"corrupt","bytes":4}` | Flip the low bit of the first N payload bytes of a Read response or Write request, length-preserving, so the server must re-hash to detect the tampering. |
 
-`truncate` applies only to ByteStream `Read` responses and `Write` requests
-(shortening a unary message would produce an invalid proto). `dribble`, `delay`,
+`truncate` and `corrupt` apply only to ByteStream `Read` responses and `Write`
+requests (rewriting a unary message would produce an invalid proto); `truncate`
+shortens the payload while `corrupt` rewrites its leading bytes in place without
+changing its length. `dribble`, `delay`,
 and `abort` apply to every supported method and direction — `dribble` paces a
 unary message as a single whole-message chunk. The supported-method allow-list in
 `validFault` covers nine REAPI methods (ByteStream `Read`/`Write`; CAS
