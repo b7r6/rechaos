@@ -6,5 +6,5 @@ cd "$(dirname "$0")/.."
 cabal test core
 mkdir -p .build/python
 mapfile -t protos < <(rg --files proto -g '*.proto')
-python3 -m grpc_tools.protoc -Iproto --python_out=.build/python "${protos[@]}"
+python3 -m grpc_tools.protoc -Iproto --python_out=.build/python --grpc_python_out=.build/python "${protos[@]}"
 python3 test/integration.py
