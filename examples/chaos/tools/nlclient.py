@@ -7,7 +7,7 @@ Usage:
 Writes to CAS on 127.0.0.1:51055 (instance 'main').
 """
 import sys, os, hashlib, time, threading, concurrent.futures
-sys.path.insert(0, "/home/b7r6/src/rechaos/.build/python")
+import os as _os; sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "..", ".build", "python"))
 import grpc
 from google.bytestream import bytestream_pb2 as bs
 

@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0,"/home/b7r6/src/rechaos/.build/python")
+import os as _os; sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "..", ".build", "python"))
 import grpc
 from build.bazel.remote.execution.v2 import remote_execution_pb2 as re
 from build.bazel.remote.execution.v2 import remote_execution_pb2_grpc as re_grpc
