@@ -20,6 +20,21 @@ Tests are the pure-core QuickCheck/HUnit suite (`test/CoreSpec.hs`, run by
 `nix build`) plus an independent Python gRPC peer (`test/integration.py`) that
 exercises forwarding, metadata, all faults, deadlines, replay, and shrinking.
 
+### Reproducible cabal builds
+
+A committed `cabal.project` pins the Hackage `index-state:` so a plain cabal
+build resolves a stable plan over time. Inside `nix develop`, `cabal build all`
+and `cabal test core` work directly (they back `scripts/build.sh` and
+`scripts/test.sh`). The nix flake remains the authoritative, byte-reproducible
+build; cabal resolves its own plan and may differ from the nix pin.
+
+### Editor / IDE
+
+The committed `hie.yaml` is an explicit multi-component cradle, so HLS is
+zero-config: open the repo and every component (`rechaos-proto`, `rechaos`, the
+`rechaos` executable, and the `core` test-suite) resolves without touching
+implicit-cradle discovery.
+
 ## Style
 
 - Format with the committed config before sending a change:

@@ -1,0 +1,14 @@
+# Explicit multi-component cradle so HLS resolves every component without
+# relying on implicit-cradle discovery: the generated proto library, the main
+# library, the executable, and the core test-suite. Component names match the
+# stanzas in rechaos.cabal.
+cradle:
+  cabal:
+    - path: "./generated"
+      component: "lib:rechaos-proto"
+    - path: "./src"
+      component: "lib:rechaos"
+    - path: "./app"
+      component: "exe:rechaos"
+    - path: "./test"
+      component: "test:core"

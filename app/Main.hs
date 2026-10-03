@@ -121,7 +121,13 @@ commandParser =
           ( Minimize
               <$> optionFile "timeline" "Recorded fault timeline"
               <*> optionFile "output" "Minimized JSONL timeline"
-              <*> optionString "check" "CMD" "Shell command that reads RECHAOS_TIMELINE and writes RECHAOS_VERDICT"
+              <*> optionString
+                "check"
+                "CMD"
+                ( "Checker command, run via the shell (/bin/sh -c): reads the timeline path from "
+                    <> "$RECHAOS_TIMELINE and writes a JSON verdict to $RECHAOS_VERDICT "
+                    <> "(triggers / does-not-trigger plus a signature)."
+                )
               <*> optionString "signature" "SIG" "Exact failure signature to preserve"
               <*> option auto (long "repetitions" <> metavar "N" <> value 2 <> showDefault)
               <*> option auto (long "trial-timeout" <> metavar "SECONDS" <> value 30 <> showDefault)
@@ -176,9 +182,10 @@ serveOptions =
       )
     <*> strOption
       ( long "record"
+          <> metavar "FILE"
           <> value "runs/timeline.jsonl"
           <> showDefault
-          <> help "New decision log; outcomes go to PATH.outcomes.jsonl"
+          <> help "New decision log; outcomes go to FILE.outcomes.jsonl"
       )
     <*> option
       auto
@@ -200,7 +207,17 @@ main = (execParser opts >>= run) `catches` [Handler onExit, Handler onIO, Handle
   opts =
     info
       (commandParser <**> versioner <**> helper)
-      (fullDesc <> progDesc "rechaos: black-box REAPI chaos and determinism checking")
+      ( fullDesc
+          <> progDesc "rechaos: black-box REAPI chaos and determinism checking"
+          <> header
+            ( "rechaos - a black-box chaos and determinism checker for the Remote Execution API. "
+                <> "It sits as a gateway between a build client and its REAPI backend, injecting faults "
+                <> "and recording a replayable decision timeline. Start with 'rechaos serve' to run the "
+                <> "gateway; the other subcommands analyse the artifacts it produces."
+            )
+          <> footer
+            "Run 'rechaos serve --help' for gateway options, or 'rechaos COMMAND --help' for any subcommand."
+      )
   -- Let optparse-applicative's own exits (usage, --help, --version) pass through,
   -- and preserve any ExitCode a subcommand raised (e.g. divergence = exit 1).
   onExit :: ExitCode -> IO a
@@ -237,7 +254,7 @@ serveHint msg = msg ++ " (see 'rechaos serve --help')"
 
 run :: Command -> IO ()
 run (Validate path) = do
-  _ <- withPath path (readPolicy path)
+  _ <- withPath ("policy " ++ path) (readPolicy path)
   hPutStrLn stderr "policy valid"
   putVerdict "valid"
 run (VerifyReplay expected observed) = do
@@ -271,7 +288,7 @@ run (Serve opts) = do
   unless (all (\n -> n > 0 && n <= 65535) [port opts, upstreamPort opts]) $
     fail (serveHint "ports must be in 1..65535")
   unless (maxSeconds opts > 0 && maxSeconds opts <= 86400) $
-    fail "max-call-seconds must be in 1..86400"
+    fail (serveHint "max-call-seconds must be in 1..86400")
   when (sparse opts && isNothing (replayFile opts)) $ fail (serveHint "--sparse requires --replay")
   when (isJust (ca opts) && not (tlsUpstream opts)) $ fail (serveHint "--ca requires --upstream-tls")
   when (isJust (policyFile opts) && isJust (replayFile opts)) $
@@ -282,7 +299,7 @@ run (Serve opts) = do
       ( \file -> do
           a <- canonicalizePath file
           b <- canonicalizePath (record opts)
-          when (a == b) $ fail "record path must differ from replay path"
+          when (a == b) $ fail (serveHint "record path must differ from replay path")
           ds <- withPath ("replay " ++ file) (readTimeline file)
           pure (sparse opts, ds)
       )

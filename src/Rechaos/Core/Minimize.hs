@@ -114,15 +114,16 @@ candidates xs = nub (deletions ++ intensities)
 {- | Strictly weaker variants of a fault, if any, used for intensity shrinking.
   Each step moves along a finite, decreasing measure toward the event's natural
   bound: 'Delay' halves toward zero, 'Dribble' doubles its rate toward the
-  message's full-speed cap, and 'Truncate' raises its kept-byte count toward the
-  full message size. 'Abort' has no weaker form.
+  message's full-speed cap (@messageBytes * 'microsPerSecond'@, the rate that
+  delivers the whole message in one microsecond), and 'Truncate' raises its
+  kept-byte count toward the full message size. 'Abort' has no weaker form.
 -}
 weaker :: Event -> Fault -> [Fault]
 weaker _ (Delay n) = [Delay (n `div` 2) | n > 0]
 weaker e (Dribble rate chunk) =
   [Dribble (min cap (max 1 rate * 2)) chunk | rate < cap]
  where
-  cap = max 1 (eMessageBytes e * 1000000)
+  cap = max 1 (eMessageBytes e * microsPerSecond)
 weaker e (Truncate keep) =
   [Truncate (keep + max 1 ((cap - keep) `div` 2)) | keep < cap]
  where

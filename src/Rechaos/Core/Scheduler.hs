@@ -28,12 +28,15 @@ module Rechaos.Core.Scheduler (
   replayDecision,
   validateTimeline,
   dribbleMicros,
+  dribbleSchedule,
   verifyReplay,
+  verifyReplayExact,
 ) where
 
 import Data.Bits (shiftR, xor)
 import Data.List (mapAccumL)
 import Data.Map.Strict qualified as M
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word64)
@@ -86,7 +89,7 @@ step rs s e = (s', Decision e (choose rs))
   choose [] = Nothing
   choose (r : rest)
     | matches (target r) e =
-        if fromIntegral (draw `mod` 1000000) < chancePpm r
+        if fromIntegral (draw `mod` fromIntegral ppmDenominator) < chancePpm r
           then Just (fault r)
           else Nothing
     | otherwise = choose rest
@@ -139,16 +142,71 @@ replayDecision sparse timeline e = case M.lookup (eventKey e) timeline of
 -}
 dribbleMicros :: Natural -> Natural -> Maybe Natural
 dribbleMicros 0 _ = Nothing
-dribbleMicros rate bytes = Just ((bytes * 1000000 + rate - 1) `div` rate)
+dribbleMicros rate bytes = Just ((bytes * microsPerSecond + rate - 1) `div` rate)
+
+-- The Core model of the shell's chunk pacing: splitting a payload into fixed
+-- chunks and timing each boundary with the same ceiling arithmetic as
+-- 'dribbleMicros', so the final cumulative time agrees exactly.
+
+{- | The chunk-pacing schedule for a 'Dribble' delivery:
+  @dribbleSchedule bytesPerSecond chunkBytes totalBytes@ returns the list of
+  @(chunkBytes_i, cumulativeMicros_i)@ pairs the shell would emit when dribbling
+  @totalBytes@ at @bytesPerSecond@ in @chunkBytes@-sized pieces.
+
+  Returns 'Nothing' when @bytesPerSecond == 0@ or @chunkBytes == 0@ (the same
+  invalid inputs 'dribbleMicros' and 'validFaultBounds' reject). Otherwise the
+  payload is split into @ceiling(totalBytes \/ chunkBytes)@ chunks; every chunk
+  is @chunkBytes@ except possibly the last, which carries the remainder. The
+  @cumulativeMicros_i@ of chunk @i@ is @'dribbleMicros' rate (bytes delivered
+  through chunk i)@ using the shared ceiling arithmetic.
+
+  Convention: @totalBytes == 0@ yields the single-element schedule @[(0, 0)]@ (one
+  empty chunk delivered instantly), so the schedule is always non-empty.
+
+  Contract (the properties checked in @CoreSpec@):
+
+      * __offset preservation__: the sum of the first components equals
+        @totalBytes@.
+      * __non-emptiness__: the schedule is non-empty (for @totalBytes > 0@ it has
+        @ceiling(totalBytes \/ chunkBytes)@ entries; for @totalBytes == 0@ it is
+        the singleton @[(0, 0)]@).
+      * __chunk shape__: every chunk size is @chunkBytes@ except possibly the
+        last, which is the remainder.
+      * __time agreement__: the final @cumulativeMicros@ equals
+        @'dribbleMicros' rate totalBytes@.
+
+  Total: no partial functions, and the @Nothing@ cases cover every zero input.
+-}
+dribbleSchedule :: Natural -> Natural -> Natural -> Maybe [(Natural, Natural)]
+dribbleSchedule 0 _ _ = Nothing
+dribbleSchedule _ 0 _ = Nothing
+dribbleSchedule rate chunkBytes totalBytes
+  | totalBytes == 0 = Just [(0, 0)]
+  | otherwise = Just (go 0)
+ where
+  go delivered
+    | delivered >= totalBytes = []
+    | otherwise =
+        let remaining = totalBytes - delivered
+            thisChunk = min chunkBytes remaining
+            delivered' = delivered + thisChunk
+            cumMicros = fromMaybe 0 (dribbleMicros rate delivered')
+         in (thisChunk, cumMicros) : go delivered'
 
 -- A replay run is not complete merely because none of its observed events
 -- mismatched: every required event must also have occurred.
 
-{- | Check an observed timeline against an expected one. Succeeds only when every
-  expected event occurred (incomplete replays fail) with a matching fingerprint
-  and identical injection (changed replays fail). A replay is not complete
-  merely because none of its observed events mismatched: every required event
-  must also have happened.
+{- | Check an observed timeline against an expected one (the forward inclusion).
+  Succeeds only when every expected event occurred (incomplete replays fail)
+  with a matching fingerprint and identical injection (changed replays fail). A
+  replay is not complete merely because none of its observed events mismatched:
+  every required event must also have happened.
+
+  This is the forward direction only: it tolerates /extra/ observed traffic not
+  present in @expected@, which is the correct semantics for a sparse fault
+  timeline that deliberately lists only the events it targets. For a full
+  recording that must agree bijectively, use 'verifyReplayExact', which adds the
+  reverse-inclusion check.
 -}
 verifyReplay :: Timeline -> Timeline -> Either Text ()
 verifyReplay expected observed = do
@@ -159,3 +217,36 @@ verifyReplay expected observed = do
   check actual d = case M.lookup (eventKey (event d)) actual of
     Just found | sameEvent (event d) (event found) && injection d == injection found -> Right ()
     _ -> Left (T.pack "replay incomplete or changed: " <> T.pack (show (eventKey (event d))))
+
+-- A full recording must agree in BOTH directions: no required event missing or
+-- changed (the forward check) AND no spurious injected decision in the observed
+-- timeline that the recording never named (the reverse check).
+
+{- | Check bijective agreement between a full recording and an observed timeline.
+  Runs the full 'verifyReplay' forward check (every expected event occurred,
+  unchanged, with an identical injection) and additionally fails closed on the
+  reverse inclusion: any observed decision whose 'injection' is @'Just' _@ but
+  whose 'eventKey' is absent from @expected@ is a spurious injected fault the
+  recording never named, reported as
+
+  @Left ("unexpected injected event in observed timeline: " <> show key)@.
+
+  'verifyReplayExact' therefore certifies that the two timelines agree as a
+  bijection over injected decisions, which is the right contract for full
+  recordings. 'verifyReplay' (and sparse fault timelines in general) deliberately
+  tolerate unlisted traffic and so only enforce the forward direction.
+-}
+verifyReplayExact :: Timeline -> Timeline -> Either Text ()
+verifyReplayExact expected observed = do
+  verifyReplay expected observed
+  wanted <- validateTimeline expected
+  mapM_ (checkExtra wanted) observed
+ where
+  checkExtra wanted d
+    | injection d == Nothing = Right ()
+    | M.member (eventKey (event d)) wanted = Right ()
+    | otherwise =
+        Left
+          ( T.pack "unexpected injected event in observed timeline: "
+              <> T.pack (show (eventKey (event d)))
+          )

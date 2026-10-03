@@ -31,6 +31,9 @@ nix build
 ./result/bin/rechaos --help
 ```
 
+New here? [`docs/tutorial.md`](docs/tutorial.md) walks one concrete scenario from
+build to minimized witness against a local NativeLink endpoint.
+
 ## Run the gateway
 
 ```sh
@@ -178,11 +181,11 @@ behind the pure-core / IO-shell split, the determinism model, and replay.
 
 | Path | Contents |
 |---|---|
-| `examples/` | `fault-policy.json`, the complete one-file policy example; `examples/chaos/*.json5`, NativeLink server configs for isolated local endpoints used in reproductions |
+| `examples/` | `fault-policy.json`, the complete one-file policy example; `examples/chaos/*.json5`, NativeLink server configs for isolated local endpoints used in reproductions, mapped to their roles and launch commands in [`examples/chaos/README.md`](examples/chaos/README.md) |
 | `scripts/` | `chaos-monkey.py`, build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
 | `reports/` | Dated investigation write-ups and their captured evidence under `reports/evidence/` |
 | `proto/` | Vendored `remote-apis` and `googleapis` protocol definitions with their licenses |
-| `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
+| `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`tutorial.md`](docs/tutorial.md) (end-to-end walkthrough), [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
 
 ## Develop
 
@@ -195,6 +198,12 @@ bash scripts/test.sh
 Protocol definitions are vendored from pinned, public `bazelbuild/remote-apis` and
 `googleapis/googleapis` commits; generated Haskell is included. Tests use an
 independent Python gRPC peer plus QuickCheck properties for the core.
+
+API documentation (Haddock) is published at
+<https://b7r6.github.io/rechaos/>; build it locally with `nix build .#docs` and
+open `result/share/doc/*/html/index.html`. The flake also exposes
+`nix run .# -- serve ...` to run the gateway without a prior `nix build`, and
+`nix fmt` to format the hand-written Haskell sources in place.
 
 ## License
 

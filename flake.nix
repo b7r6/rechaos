@@ -55,6 +55,28 @@
           # The rendered Haddock HTML as a browsable artifact.
           docs = b.docsPackage.doc;
         });
+      # `nix run .# -- serve ...` runs the shipped executable. The cabal stanza
+      # names it `rechaos`, matching the result symlink's bin/rechaos.
+      apps = eachSystem (system:
+        let b = build system;
+        in {
+          default = {
+            type = "app";
+            program = "${b.package}/bin/rechaos";
+          };
+        });
+      # `nix fmt` formats the hand-written sources in place. The fourmolu flag
+      # list is the single source of truth shared with checks.format below
+      # (which runs the `--mode check` counterpart); keep the two in sync.
+      formatter = eachSystem (system:
+        let b = build system;
+        in b.pkgs.writeShellApplication {
+          name = "rechaos-fmt";
+          runtimeInputs = [ b.pkgs.haskellPackages.fourmolu ];
+          text = ''
+            fourmolu --mode inplace -o -XImportQualifiedPost app src test
+          '';
+        });
       checks = eachSystem (system:
         let b = build system;
         in {

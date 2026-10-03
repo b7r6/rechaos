@@ -16,3 +16,5 @@ result-*
 *.pyc
 .revamp-staging/
 .claude/
+lean/.lake/
+.lake/

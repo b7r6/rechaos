@@ -468,6 +468,96 @@ main = do
   check "dribble rejects zero chunk and zero rate" $
     not (isRight (decodeDribbleRule 1 0))
       && not (isRight (decodeDribbleRule 0 16))
+  -- (P) dribbleSchedule chunk pacing ------------------------------------------
+  check "dribbleSchedule is Nothing iff rate or chunk is zero" $ \(NonNegative r) (NonNegative c) (NonNegative t) ->
+    let rate = fromIntegral (r :: Int)
+        chunk = fromIntegral (c :: Int)
+        total = fromIntegral (t :: Int)
+     in (dribbleSchedule rate chunk total == Nothing) == (rate == 0 || chunk == 0)
+  check "dribbleSchedule preserves the total offset and agrees with dribbleMicros" $ \(Positive r) (Positive c) (NonNegative t) ->
+    let rate = fromIntegral (r :: Int)
+        chunk = fromIntegral (c :: Int)
+        total = fromIntegral (t :: Int)
+     in case dribbleSchedule rate chunk total of
+          Nothing -> False
+          Just sched ->
+            not (null sched)
+              && sum (map fst sched) == total
+              && ( case reverse sched of
+                     (_, lastMicros) : _ -> Just lastMicros == dribbleMicros rate total
+                     [] -> False
+                 )
+  check "dribbleSchedule chunk sizes are all chunkBytes except possibly the last" $ \(Positive r) (Positive c) (Positive t) ->
+    let rate = fromIntegral (r :: Int)
+        chunk = fromIntegral (c :: Int)
+        total = fromIntegral (t :: Int)
+     in case dribbleSchedule rate chunk total of
+          Nothing -> False
+          Just sched ->
+            let firsts = map fst sched
+             in all (== chunk) (dropLast firsts)
+                  && (case reverse firsts of l : _ -> l >= 1 && l <= chunk; [] -> False)
+  check "dribbleSchedule on an empty payload is the singleton (0,0)" $ \(Positive r) (Positive c) ->
+    let rate = fromIntegral (r :: Int); chunk = fromIntegral (c :: Int)
+     in dribbleSchedule rate chunk 0 == Just [(0, 0)]
+  -- (Q) dribbleMicros exactness -----------------------------------------------
+  check "dribbleMicros is the exact floor when rate divides evenly, and zero bytes give zero" $ \(Positive r) (NonNegative q) ->
+    let rate = fromIntegral (r :: Int)
+        quotient = fromIntegral (q :: Int)
+        bytes = (quotient * rate) `div` microsPerSecond
+     in dribbleMicros rate 0 == Just 0
+          && ( case dribbleMicros rate bytes of
+                 Just us -> us * rate >= bytes * microsPerSecond && (us == 0 || (us - 1) * rate < bytes * microsPerSecond)
+                 Nothing -> False
+             )
+  check "dribbleMicros divides exactly with no spurious +1 on an aligned product" $ \(Positive r) (NonNegative m) ->
+    let rate = fromIntegral (r :: Int)
+        mult = fromIntegral (m :: Int)
+        -- choose bytes so that bytes*microsPerSecond is an exact multiple of rate
+        bytes = mult * rate
+     in dribbleMicros rate bytes == Just ((bytes * microsPerSecond) `div` rate)
+  -- (R) ppm boundary statistical streams --------------------------------------
+  check "chancePpm == 0 never fires over a generated event stream" $ \s (Positive n) ->
+    let es = map (eventAt . fromIntegral) [1 .. (n `mod` 200 + 1 :: Int)]
+        p = Policy s [Rule targetAll 0 (Delay 1)]
+     in all (\d -> injection d == Nothing) (schedule p es)
+  check "chancePpm == maxPpm always fires over a generated event stream" $ \s (Positive n) ->
+    let es = map (eventAt . fromIntegral) [1 .. (n `mod` 200 + 1 :: Int)]
+        p = Policy s [Rule targetAll maxPpm (Delay 1)]
+     in all (\d -> injection d == Just (Delay 1)) (schedule p es)
+  -- (S) verifyReplayExact bijective semantics ---------------------------------
+  check "verifyReplayExact rejects an extra injected decision that verifyReplay tolerates" $
+    let expected = [Decision (eventAt 1) (Just (Delay 1))]
+        observed = [Decision (eventAt 1) (Just (Delay 1)), Decision (eventAt 2) (Just (Delay 1))]
+     in isRight (verifyReplay expected observed)
+          && not (isRight (verifyReplayExact expected observed))
+  check "verifyReplayExact tolerates an extra non-injected (pass-through) observed event" $
+    let expected = [Decision (eventAt 1) (Just (Delay 1))]
+        observed = [Decision (eventAt 1) (Just (Delay 1)), Decision (eventAt 2) Nothing]
+     in isRight (verifyReplayExact expected observed)
+  check "both verifyReplay and verifyReplayExact accept an exact match" $ \s ->
+    let ds = schedule (policy s) (map eventAt [1 .. 8])
+     in isRight (verifyReplay ds ds) && isRight (verifyReplayExact ds ds)
+  check "verifyReplayExact still fails closed on a missing expected event" $
+    let ds = [Decision (eventAt 1) Nothing, Decision (eventAt 2) (Just (Delay 1))]
+     in not (isRight (verifyReplayExact ds (take 1 ds)))
+  -- (T) determinism and invariants over an arbitrary Policy -------------------
+  check "schedule is deterministic for an arbitrary policy and event stream" $ \(p :: Policy) (NonNegative n) ->
+    let es = map (eventAt . fromIntegral) [1 .. (n `mod` 50 :: Int)]
+     in schedule p es == schedule p es
+  check "trace-split agreement generalizes to an arbitrary policy" $ \(p :: Policy) (NonNegative count) ->
+    let es = map (eventAt . fromIntegral) [1 .. (count `mod` 100 + 1 :: Int)]
+        (a, b) = splitAt (count `mod` 30) es
+        advance (seed0, ds) e = let (seed1, d) = step (rules p) seed0 e in (seed1, ds ++ [d])
+        (next, da) = foldl advance (seed p, []) a
+        (_, db) = foldl advance (next, []) b
+     in schedule p es == da ++ db
+  check "seed advances exactly once per event for an arbitrary policy" $ \(p :: Policy) (NonNegative count) ->
+    let n = count `mod` 100 :: Int
+        es = map (eventAt . fromIntegral) [1 .. n]
+        advance (seed0, ds) e = let (seed1, d) = step (rules p) seed0 e in (seed1, ds ++ [d])
+        (final, _) = foldl advance (seed p, []) es
+     in final == iterate (fst . nextSeed) (seed p) !! n
   -- (L) golden snapshots ------------------------------------------------------
   goldenSnapshots
  where
@@ -498,6 +588,11 @@ main = do
     ]
   isRight (Right _) = True
   isRight _ = False
+  -- All but the last element; total (empty on lists of length < 2).
+  dropLast :: [a] -> [a]
+  dropLast [] = []
+  dropLast [_] = []
+  dropLast (x : xs) = x : dropLast xs
   -- The standard gRPC codes the Status haddock deliberately excludes:
   -- OK(0), Unknown(2), AlreadyExists(6), PermissionDenied(7), Aborted(10),
   -- OutOfRange(11), Unimplemented(12), Unauthenticated(16).

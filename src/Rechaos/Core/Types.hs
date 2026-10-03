@@ -33,6 +33,8 @@ module Rechaos.Core.Types (
 
   -- * Numeric invariants
   maxPpm,
+  ppmDenominator,
+  microsPerSecond,
   mkRule,
   maxDribbleChunkBytes,
   validFaultBounds,
@@ -199,6 +201,33 @@ data Rule = Rule
 -}
 maxPpm :: Natural
 maxPpm = 1_000_000
+
+{- | The parts-per-million scale the scheduler draws against: the denominator of
+  the firing test in "Rechaos.Core.Scheduler". A rule fires when the generator's
+  draw modulo this value is below the rule's 'chancePpm', so it is exactly the
+  size of the ppm sample space. Defined as 'maxPpm' to keep a single ppm source
+  of truth (@'maxPpm' == 'ppmDenominator'@).
+
+  Numerically equal to 'microsPerSecond' (both @1_000_000@) but a distinct
+  physical quantity: this is a dimensionless parts-per-million scale, whereas
+  'microsPerSecond' carries units of microseconds per second. The two must not
+  be conflated even though they share a value.
+-}
+ppmDenominator :: Natural
+ppmDenominator = maxPpm
+
+{- | Microseconds per second: the dribble timing unit used by
+  @Rechaos.Core.Scheduler.dribbleMicros@ and
+  @Rechaos.Core.Scheduler.dribbleSchedule@ to convert a bytes-per-second rate
+  into an elapsed-microseconds duration.
+
+  Numerically equal to 'ppmDenominator' (both @1_000_000@) but a distinct
+  physical quantity: this carries units of microseconds per second, whereas
+  'ppmDenominator' is a dimensionless parts-per-million scale. The two must not
+  be conflated even though they share a value.
+-}
+microsPerSecond :: Natural
+microsPerSecond = 1_000_000
 
 {- | Validated entry point for building a 'Rule': returns 'Nothing' when
   @chancePpm@ exceeds 'maxPpm', and @'Just' rule@ otherwise. The raw 'Rule'

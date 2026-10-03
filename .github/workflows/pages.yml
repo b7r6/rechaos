@@ -1,0 +1,60 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#                                                                     // pages
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Publishes the already-built browsable Haddock artifact to GitHub Pages.
+# `nix build .#docs` produces the rendered HTML under
+# result/share/doc/<pkg>-<version>/html; this workflow uploads that subtree
+# and deploys it with the standard upload-pages-artifact + deploy-pages flow.
+# The hosted site lands at https://b7r6.github.io/rechaos/.
+# Leaves .github/workflows/ci.yml (the hermetic `nix flake check` gate)
+# untouched.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege for the deploy: write the Pages artifact and mint the OIDC
+# token deploy-pages exchanges; read the repo to check it out.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight Pages deploy at a time; let a running deploy finish rather
+# than cancelling a publish mid-flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build Haddock (nix build .#docs)
+        run: nix build .#docs -L
+      - name: Stage the rendered HTML
+        run: |
+          html="$(find -L result/share/doc -type d -name html -print -quit)"
+          test -n "$html" || { echo "no html directory under result/share/doc" >&2; exit 1; }
+          test -f "$html/index.html" || { echo "no index.html in $html" >&2; exit 1; }
+          cp -rL "$html" ./_site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
