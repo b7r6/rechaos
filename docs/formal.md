@@ -391,6 +391,122 @@ both candidate generation and the acceptance state machine over the committed
 scope, and termination plus witness preservation are additionally proved abstractly
 for all timelines.
 
+## The replay layer
+
+On top of the minimizer, the verified core now also models the **replay** checks —
+the last piece of the determinism contract. Replay is what turns a recorded
+timeline into a reproducible witness: re-observing the same events must reproduce
+exactly the decisions that were recorded. The Lean port lives in
+[`lean/Rechaos/Replay.lean`](../lean/Rechaos/Replay.lean) and is faithful to the
+Haskell reference `validateTimeline` / `replayDecision` / `verifyReplay` in
+[`src/Rechaos/Core/Scheduler.hs`](../src/Rechaos/Core/Scheduler.hs).
+
+The same discipline holds: **the Haskell reference leads**. The concrete replay
+verdicts and per-event outcomes are pinned to the reference by a corpus that
+`scripts/gen-conformance.hs` generates *by running the real Haskell
+`verifyReplay`/`replayDecision`*; the three load-bearing properties — replay
+**identity** (round-trip), **fail-closed** (a changed fingerprint rejects), and
+**coverage** (a missing recorded event rejects) — are proved in Lean abstractly,
+needing no corpus.
+
+### Definition map: Haskell → Lean (replay)
+
+| Concept | Haskell (`Rechaos.Core.Scheduler`) | Lean (`Rechaos.Replay`) |
+|---|---|---|
+| Indexed timeline | `Data.Map EventKey Decision` | `abbrev EventTable := List (EventKey × Decision)` (distinct keys) |
+| Build / validate | `validateTimeline :: Timeline -> Either Text (Map EventKey Decision)` | `validateTimeline : Timeline → Option EventTable` |
+| Single-event replay | `replayDecision :: Bool -> Map … -> Event -> Either Text Decision` | `replayDecision (sparse) (table) (evt) : ReplayOutcome` |
+| Replay outcome | `Either Text Decision` (`Left`=reject, `Right`=apply) | `ReplayOutcome.rejected \| .decided (decision)` |
+| Coverage check | `verifyReplay :: Timeline -> Timeline -> Either Text ()` | `verifyReplay (expected observed) : Bool` |
+| Elapsed-agnostic equality | `sameEvent` (via `fingerprint`) | `sameEvent` (via `fingerprint`, in `Types.lean`) |
+
+The Haskell indexes a timeline with a `Data.Map`, whose insert guard rejects a
+repeated event identity; the Lean `validateTimeline` builds an association list and
+rejects a repeated key with the matching `tableMember` guard, so it fails on exactly
+the same ill-formed timelines. Because both observable replay operations — key
+lookup and the coverage conjunction — are independent of association order once keys
+are unique, the association-list port is behaviourally faithful to the map. The
+`sparse` flag selects the same semantics as the reference: a full recording
+(`false`) fails closed on any event missing from the table, a sparse fault timeline
+(`true`) passes unlisted traffic through, and either way a present event must still
+match its recorded `fingerprint` (via `sameEvent`, which ignores only arrival time)
+or replay is rejected. `verifyReplay` is the forward-inclusion coverage check:
+every recorded event must have been observed, unchanged, with an identical
+injection, so an incomplete replay is rejected even when nothing observed
+mismatched. The `Either Text ()` verdict is modelled as a `Bool` (`true` = `Right
+()`, `false` = `Left _`); since success is a conjunction over all recorded events
+and failure is any single miss, the boolean verdict is order-independent and
+faithful.
+
+### Proved in Lean (abstract, no corpus)
+
+These are in `lean/Rechaos/Replay.lean`, proved over core Lean (no Mathlib, no
+`UInt64` arithmetic) by structural induction over the table:
+
+- `validateTimeline_nodup` / `validateTimeline_key_agree` — the **validated-table
+  invariants**: a validated table has distinct keys, and every binding is keyed by
+  its own event's `eventKey`. Proved by threading each invariant through the
+  `validateTimeline.go` accumulator (the duplicate guard `tableMember` never inserts
+  a key already present). `lookup_of_mem_nodup` then shows that in a distinct-key
+  table every binding looks itself up.
+- `verifyReplay_identity` — **REPLAY IDENTITY** (the prize): any timeline that
+  validates verifies against itself (`verifyReplay t t = true`). Replaying a
+  recording against the very events it recorded always succeeds — every recorded
+  event is observed, unchanged, with its recorded injection.
+  `replayDecision_recorded_identity` is the single-decision form (a recorded
+  decision replays to exactly itself), and `verifyReplay_schedule_identity`
+  specializes the trace-level result to `schedule policy events`: when the scheduled
+  timeline validates (its events carry distinct identities), replaying it against
+  itself reproduces exactly those decisions. This is the round-trip that closes the
+  determinism contract.
+- `replayDecision_rejects_changed_fingerprint` / `verifyReplay_changed_rejected` —
+  **FAIL-CLOSED**: a recorded event re-observed with a *different* payload
+  fingerprint is rejected, both at the single-event level and through the
+  trace-level coverage check. A changed recording is never silently accepted.
+  `replayDecision_reuses_recorded_injection` is the positive counterpart: a matching
+  fingerprint (even with a fresh arrival time) reuses the recorded injection.
+- `verifyReplay_missing_rejected` / `verifyReplay_empty_observed_rejected` —
+  **COVERAGE**: a recorded event that never arrived rejects the replay — the general
+  form (any recorded key absent from the observed table) and the sharp form (a
+  nonempty recording replayed against an empty observed timeline).
+
+### Reference-leads differential (corpus, `native_decide`)
+
+`scripts/gen-conformance.hs` runs the real Haskell `verifyReplay`/`replayDecision`
+and emits the replay corpus as a JSON golden *and* as Lean terms in
+[`lean/Rechaos/ReplayCorpus.lean`](../lean/Rechaos/ReplayCorpus.lean):
+
+- **coverage verdicts** — `test/golden/replay.jsonl` (first block), one row per
+  `(expected, observed)` pair over a scope spanning an exact match, an
+  arrival-time-only perturbation (must still verify, since `sameEvent` ignores
+  elapsed time), a changed-fingerprint case (must be **rejected**), a missing-event
+  case (coverage must **reject**), an extra observed pass-through (tolerated by the
+  forward check), and a changed-injection case (must be **rejected**). Each row
+  carries the reference `verifyReplay` verdict. The Lean theorem
+  `verifyReplay_conforms_on_replayScope` checks, by `native_decide`, that the Lean
+  `verifyReplay` reproduces every verdict.
+- **per-event replay outcomes** — `test/golden/replay.jsonl` (second block), one row
+  per `(sparse?, event)` probe of `replayDecision` against the recorded
+  `replayExpected` table, under both the full and sparse semantics, over a recorded
+  pass-through (new arrival time), a recorded injection (new arrival time), a changed
+  fingerprint, and an unrecorded event. Each row carries the reference outcome
+  (`rejected`, or `decided` with the reused injection). The Lean theorem
+  `replayDecision_conforms_on_replayProbeScope` checks, by `native_decide`, that the
+  Lean `replayDecision` reproduces every outcome — reusing the recorded injection on
+  a matching fingerprint, failing closed on a changed one, and splitting the
+  missing-event case by `sparse` (full rejects, sparse passes through).
+
+On the Haskell side, `CoreSpec.hs`'s golden-snapshot block re-derives both corpus
+blocks from the reference and fails if the committed bytes do not reproduce
+(byte-for-byte through `verifyReplay`/`replayDecision`). The golden is listed in
+`rechaos.cabal`'s `extra-source-files`, and it is regenerated — alongside the other
+corpora and Lean files — by `scripts/gen-conformance.hs`.
+
+The Lean replay layer is therefore **differentially conformant to the reference** on
+both the coverage verdicts and the per-event replay outcomes over the committed
+scope, and replay identity, fail-closed, and coverage are additionally proved
+abstractly for all validatable timelines.
+
 ## Machine-checked in Lean vs. QuickCheck-only in Haskell
 
 It is important to be precise about the boundary between what the Lean kernel has
@@ -438,14 +554,39 @@ the kernel, not by examples.
   QuickCheck properties over `candidates`/`observe` in `CoreSpec.hs` (including
   deletion-1-minimality of a converged result) remain as an independent sampled
   check on the reference itself.
+- The replay checks — `validateTimeline` / `replayDecision` / `verifyReplay` — are
+  **now also proved/pinned in Lean** (`lean/Rechaos/Replay.lean`): replay identity
+  (`verifyReplay_identity`, with `verifyReplay_schedule_identity` and the
+  single-decision `replayDecision_recorded_identity`), fail-closed
+  (`replayDecision_rejects_changed_fingerprint` / `verifyReplay_changed_rejected`),
+  and coverage (`verifyReplay_missing_rejected` /
+  `verifyReplay_empty_observed_rejected`) are proved abstractly, and the concrete
+  verdicts + per-event outcomes are pinned to the reference by the `native_decide`
+  corpora `verifyReplay_conforms_on_replayScope` and
+  `replayDecision_conforms_on_replayProbeScope` (see "The replay layer" above). The
+  QuickCheck properties over replay's incomplete-vs-changed semantics in
+  `CoreSpec.hs` remain as an independent sampled check on the reference itself.
 - Everything else outside the keystream: the status-code bijection, dribble pacing,
-  replay incomplete-vs-changed semantics, and JSON round-trips. These live entirely
-  in `CoreSpec.hs` and have no Lean counterpart today.
+  and JSON round-trips. These live entirely in `CoreSpec.hs` and have no Lean
+  counterpart today.
 
 In short: Lean proves that the keystream *is a deterministic, additive iteration
 of a single step per event*; QuickCheck checks that the *concrete SplitMix64 step*
 has the exact bits and injectivity we expect, and that the production `step`/
 `schedule` functions actually realize that iteration.
+
+**Every pure-core layer is now machine-checked with the reference generating each
+corpus.** The five layers of the verified core — the SplitMix64 **keystream**
+(`Core.lean`), the **scheduler** (`Scheduler.lean`), the output-tree **oracle**
+(`Oracle.lean`), the **minimizer** (`Minimize.lean`), and now the **replay** checks
+(`Replay.lean`) — each ship a faithful Lean port, a set of abstract theorems proved
+by the kernel, and a `native_decide` conformance theorem against a corpus that
+`scripts/gen-conformance.hs` generates *by running the real Haskell reference*. The
+same reference-leads discipline runs end to end: the Haskell implementation is the
+authority, every corpus is generated from it, and both the Lean kernel and the
+Haskell `CoreSpec` golden-snapshot block re-verify it. The determinism contract —
+same policy + seed + trace ⇒ same decisions, recorded and replayed without drift —
+is now closed by a proof, not merely by sampling.
 
 ## The no-sorry policy
 

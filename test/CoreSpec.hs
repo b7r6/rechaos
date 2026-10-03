@@ -574,6 +574,7 @@ main = do
         L.writeFile "test/golden/decisions.jsonl" decisionsBytes
         L.writeFile "test/golden/oracle.jsonl" oracleBytes
         L.writeFile "test/golden/minimize.jsonl" minimizeBytes
+        L.writeFile "test/golden/replay.jsonl" replayBytes
         putStrLn "golden snapshots regenerated"
       Nothing -> do
         putStrLn "golden schedule snapshot matches committed bytes"
@@ -621,6 +622,15 @@ main = do
         putStrLn "reference minimizer reproduces the committed minimize corpus"
         onDiskMinimize <- L.readFile "test/golden/minimize.jsonl"
         unless (onDiskMinimize == minimizeBytes) exitFailure
+        -- Reference-leads replay conformance: the committed replay corpus (shared
+        -- with the Lean verifyReplay_conforms_on_replayScope and
+        -- replayDecision_conforms_on_replayProbeScope native_decide anchors) is a
+        -- byte snapshot of the reference verifyReplay verdicts + per-event
+        -- replayDecision outcomes over the corpus scope. The reference must
+        -- reproduce those exact bytes.
+        putStrLn "reference replay reproduces the committed replay corpus"
+        onDiskReplay <- L.readFile "test/golden/replay.jsonl"
+        unless (onDiskReplay == replayBytes) exitFailure
   -- One representative Rule per Fault constructor, plus an Abort carrying a Status.
   goldenFaultRules :: [Rule]
   goldenFaultRules =
@@ -905,6 +915,129 @@ main = do
     jsonMinFault (Just (Dribble rate chunk)) =
       LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
     jsonMinFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
+  -- ── reference-leads replay corpus (kept byte-identical to the shape
+  --    scripts/gen-conformance.hs emits; regenerate both via that script) ───────
+  -- A fixed anchor event the replay timelines hang their decisions on, keyed by
+  -- occurrence with a controllable payload hash (fingerprint) and arrival time.
+  -- Mirrors replayEvent in the generator.
+  replayEvent :: Natural -> T.Text -> Natural -> Event
+  replayEvent occ hash elapsed =
+    Event "google.bytestream.ByteStream/Read" occ Response 1 (Just 100) elapsed 100 hash
+  replayDec :: Natural -> T.Text -> Natural -> Maybe Fault -> Decision
+  replayDec occ hash elapsed = Decision (replayEvent occ hash elapsed)
+  -- The recorded expected timeline, identical to replayExpected in the generator.
+  replayExpected :: Timeline
+  replayExpected =
+    [ replayDec 1 "h1" 100 Nothing
+    , replayDec 2 "h2" 200 (Just (Delay 5))
+    , replayDec 3 "h3" 300 (Just (Abort Internal))
+    ]
+  -- The observed-timeline scope, identical to replayPairs in the generator.
+  replayPairs :: [(Timeline, Timeline)]
+  replayPairs =
+    [ (replayExpected, replayExpected)
+    ,
+      ( replayExpected
+      ,
+        [ replayDec 1 "h1" 999 Nothing
+        , replayDec 2 "h2" 888 (Just (Delay 5))
+        , replayDec 3 "h3" 777 (Just (Abort Internal))
+        ]
+      )
+    ,
+      ( replayExpected
+      ,
+        [ replayDec 1 "h1" 100 Nothing
+        , replayDec 2 "CHANGED" 200 (Just (Delay 5))
+        , replayDec 3 "h3" 300 (Just (Abort Internal))
+        ]
+      )
+    , (replayExpected, take 2 replayExpected)
+    , (replayExpected, replayExpected ++ [replayDec 4 "h4" 400 Nothing])
+    ,
+      ( replayExpected
+      ,
+        [ replayDec 1 "h1" 100 Nothing
+        , replayDec 2 "h2" 200 (Just (Delay 9))
+        , replayDec 3 "h3" 300 (Just (Abort Internal))
+        ]
+      )
+    ]
+  -- The live events a replayDecision probe runs on, identical to the generator's
+  -- replayProbeEvents.
+  replayProbeEvents :: [Event]
+  replayProbeEvents =
+    [ replayEvent 1 "h1" 500
+    , replayEvent 2 "h2" 600
+    , replayEvent 2 "CHANGED" 600
+    , replayEvent 9 "h9" 700
+    ]
+  -- Run the reference replayDecision against the validated expected table. Mirrors
+  -- replayProbe in the generator.
+  replayProbe :: Bool -> Event -> Either T.Text Decision
+  replayProbe sparse e = case validateTimeline replayExpected of
+    Left _ -> Left (T.pack "unvalidatable expected timeline")
+    Right table -> replayDecision sparse table e
+  -- The committed replay.jsonl bytes: the reference verifyReplay verdicts over the
+  -- (expected, observed) scope, followed by the per-event replayDecision outcomes
+  -- (full then sparse) over the probe events.
+  replayBytes :: L.ByteString
+  replayBytes =
+    LC.unlines [replayRow ex ob | (ex, ob) <- replayPairs]
+      `L.append` LC.unlines
+        [replayProbeRow sparse e | sparse <- [False, True], e <- replayProbeEvents]
+   where
+    replayRow ex ob =
+      LC.concat
+        [ LC.pack "{\"expected\":"
+        , jsonReplayTimeline ex
+        , LC.pack ",\"observed\":"
+        , jsonReplayTimeline ob
+        , LC.pack ",\"verifies\":"
+        , LC.pack (if isRightUnit (verifyReplay ex ob) then "true" else "false")
+        , LC.pack "}"
+        ]
+    replayProbeRow sparse e =
+      LC.concat
+        [ LC.pack "{\"sparse\":"
+        , LC.pack (if sparse then "true" else "false")
+        , LC.pack ",\"occurrence\":"
+        , LC.pack (show (eOccurrence e))
+        , LC.pack ",\"hash\":"
+        , LC.pack (show (T.unpack (ePayloadHash e)))
+        , LC.pack ",\"elapsed\":"
+        , LC.pack (show (eElapsedMicros e))
+        , LC.pack ",\"outcome\":"
+        , replayOutcomeJson (replayProbe sparse e)
+        , LC.pack "}"
+        ]
+    replayOutcomeJson (Left _) = LC.pack "{\"rejected\":true}"
+    replayOutcomeJson (Right d) =
+      LC.concat [LC.pack "{\"decided\":", jsonReplayFault (injection d), LC.pack "}"]
+    isRightUnit (Right ()) = True
+    isRightUnit (Left _) = False
+    jsonReplayTimeline tl =
+      LC.concat
+        [LC.pack "[", LC.intercalate (LC.pack ",") (map jsonReplayDecision tl), LC.pack "]"]
+    jsonReplayDecision d =
+      let e = event d
+       in LC.concat
+            [ LC.pack "{\"occurrence\":"
+            , LC.pack (show (eOccurrence e))
+            , LC.pack ",\"hash\":"
+            , LC.pack (show (T.unpack (ePayloadHash e)))
+            , LC.pack ",\"elapsed\":"
+            , LC.pack (show (eElapsedMicros e))
+            , LC.pack ",\"injection\":"
+            , jsonReplayFault (injection d)
+            , LC.pack "}"
+            ]
+    jsonReplayFault Nothing = LC.pack "null"
+    jsonReplayFault (Just (Delay n)) = LC.pack ("{\"delay\":" ++ show n ++ "}")
+    jsonReplayFault (Just (Abort st)) = LC.pack ("{\"abort\":" ++ show (statusCode st) ++ "}")
+    jsonReplayFault (Just (Dribble rate chunk)) =
+      LC.pack ("{\"dribble\":[" ++ show rate ++ "," ++ show chunk ++ "]}")
+    jsonReplayFault (Just (Truncate keep)) = LC.pack ("{\"truncate\":" ++ show keep ++ "}")
   isRight (Right _) = True
   isRight _ = False
   -- All but the last element; total (empty on lists of length < 2).
