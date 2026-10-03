@@ -1,0 +1,98 @@
+// NativeLink fast_slow store whose SLOW tier points at the rechaos S3/R2 egress
+// fault proxy (scripts/s3_fault_proxy.py), so the CAS -> object-store write-back
+// "death spiral" can be reproduced locally.
+//
+// Topology this config sets up:
+//
+//   bazel/client --grpc--> NativeLink (:50095)
+//                            CAS store = fast_slow {
+//                              fast: local filesystem  (/tmp/rechaos/r2faults/...)
+//                              slow: S3 client  ------> 127.0.0.1:8081  (the fault proxy)
+//                            }                                   |
+//                            s3_fault_proxy  --http--> <YOUR REAL OBJECT STORE>
+//
+// The fault proxy is a SEPARATE process you start yourself (see docs/s3-faults.md
+// and examples/chaos/README.md); NativeLink only ever talks to it on
+// 127.0.0.1:8081 over plain HTTP. The proxy forwards to whatever you pass as its
+// --upstream (a real R2/S3 endpoint you control, or a local MinIO on
+// 127.0.0.1:9000 for a fully offline loop). NEVER put a real credential or a
+// hardcoded cloud endpoint in this committed file: fill the placeholders below
+// from your own environment.
+//
+// What this stresses (see docs/s3-faults.md):
+//   * slow_store write-back under a throttling / slow / truncating backend
+//   * the S3 client retry loop (max_retries, jitter, retry budget)
+//   * fast -> slow reconciliation when the slow tier returns partial/reset bodies
+//
+// Start order:
+//   1) start your real object store OR a local MinIO (127.0.0.1:9000)
+//   2) start the fault proxy pointed at it, listening on 127.0.0.1:8081
+//   3) start NativeLink with this config:  nativelink examples/chaos/r2-fault-proxy.json5
+//
+// Loopback only. All local state lives under /tmp/rechaos/r2faults.
+{
+  stores: [
+    {
+      name: "CAS_FAST_SLOW",
+      fast_slow: {
+        // Fast tier: local filesystem, like a node's local disk cache.
+        fast: {
+          filesystem: {
+            content_path: "/tmp/rechaos/r2faults/fast-content",
+            temp_path: "/tmp/rechaos/r2faults/fast-tmp",
+            eviction_policy: { max_bytes: 1000000000 },
+          },
+        },
+        // Slow tier: an S3 client whose endpoint is the rechaos fault proxy.
+        // The proxy speaks the S3 REST API and forwards to the real object store.
+        //
+        // Replace <BUCKET> with a bucket the proxy's --upstream actually serves.
+        // The access_key/secret_key below are PLACEHOLDERS: for a local MinIO
+        // upstream use its dev credentials via the environment; for real R2/S3,
+        // supply credentials through the environment, never in this file.
+        slow: {
+          experimental_s3_store: {
+            // Plain HTTP to the local fault proxy. The proxy injects faults and
+            // forwards to its --upstream. 'insecure_allow_http' keeps this a
+            // loopback HTTP hop (no TLS to the local proxy).
+            endpoint: "http://127.0.0.1:8081",
+            insecure_allow_http: true,
+            bucket: "<BUCKET>",
+            key_prefix: "cas/",
+            region: "auto",
+            // Retry policy: this is exactly what the fault proxy exists to beat on.
+            // Keep it realistic so the retry loop / backoff is actually exercised
+            // rather than giving up immediately.
+            retry: {
+              max_retries: 6,
+              delay: 0.1,
+              jitter: 0.5,
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "AC_MAIN",
+      filesystem: {
+        content_path: "/tmp/rechaos/r2faults/ac-content",
+        temp_path: "/tmp/rechaos/r2faults/ac-tmp",
+        eviction_policy: { max_bytes: 100000000 },
+      },
+    },
+  ],
+  servers: [
+    {
+      name: "local",
+      listener: { http: { socket_address: "127.0.0.1:50095" } },
+      services: {
+        cas: [ { cas_store: "CAS_FAST_SLOW" } ],
+        ac: [ { ac_store: "AC_MAIN" } ],
+        bytestream: [ { cas_store: "CAS_FAST_SLOW" } ],
+        capabilities: [ {} ],
+        experimental_prometheus: { path: "/metrics" },
+      },
+    },
+  ],
+  global: { max_open_files: 24576 },
+}
