@@ -34,6 +34,7 @@ import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word64)
+import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Numeric.Natural (Natural)
 import Rechaos.Core.Minimize qualified as Min
 import Rechaos.Core.Oracle (
@@ -874,6 +875,7 @@ replayProbeJsonRow (sparse, e, outcome) =
 
 main :: IO ()
 main = do
+  setLocaleEncoding utf8
   -- 1. SplitMix64 keystream.
   writeFile "test/golden/splitmix.jsonl" $
     unlines ["[" ++ show s ++ "," ++ show o ++ "," ++ show st ++ "]" | (s, o, st) <- rows]
