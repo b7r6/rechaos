@@ -204,9 +204,9 @@ dribbleSchedule rate chunkBytes totalBytes
 
   This is the forward direction only: it tolerates /extra/ observed traffic not
   present in @expected@, which is the correct semantics for a sparse fault
-  timeline that deliberately lists only the events it targets. For a full
-  recording that must agree bijectively, use 'verifyReplayExact', which adds the
-  reverse-inclusion check.
+  timeline that deliberately lists only the events it targets. To additionally
+  reject unrecorded injected faults, use 'verifyReplayExact'. Both checks permit
+  extra non-injected observed events.
 -}
 verifyReplay :: Timeline -> Timeline -> Either Text ()
 verifyReplay expected observed = do
@@ -222,7 +222,7 @@ verifyReplay expected observed = do
 -- changed (the forward check) AND no spurious injected decision in the observed
 -- timeline that the recording never named (the reverse check).
 
-{- | Check bijective agreement between a full recording and an observed timeline.
+{- | Check expected coverage and reject additional injected decisions.
   Runs the full 'verifyReplay' forward check (every expected event occurred,
   unchanged, with an identical injection) and additionally fails closed on the
   reverse inclusion: any observed decision whose 'injection' is @'Just' _@ but

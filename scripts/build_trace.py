@@ -11,7 +11,8 @@ action. Input blobs are heavily deduplicated across targets (shared headers,
 toolchains), sizes follow a realistic long-tailed distribution, and the whole
 graph is driven in dependency order with bounded concurrency.
 
-This tool has three subcommands, all deterministic under ``--seed``:
+This tool has three subcommands. Graph generation is deterministic for fixed
+parameters; live responses and concurrency are not:
 
   generate   synthesize a parameterized build graph and drive it against a
              live REAPI endpoint (FindMissingBlobs -> ByteStream Write ->
@@ -45,6 +46,8 @@ import sys
 import threading
 import time
 import uuid
+
+from reapi_values import action_observation
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The independent Python gRPC runtime + generated REAPI/ByteStream bindings are
@@ -167,6 +170,10 @@ class BuildGraph:
     @classmethod
     def synthesize(cls, args):
         """Build a deterministic graph from CLI parameters."""
+        if args.targets < 1 or not 1 <= args.layers <= args.targets:
+            raise ValueError("require targets >= layers >= 1")
+        if args.shared_inputs < 0 or args.max_inputs < 1 or args.max_deps < 1:
+            raise ValueError("shared-inputs must be nonnegative; max-inputs and max-deps must be positive")
         rng = random.Random(f"{args.seed}:{args.graph_id}:{args.targets}:{args.layers}")
         instance = args.instance
         gid = args.graph_id
@@ -216,13 +223,46 @@ class BuildGraph:
         return cls(gid, instance, targets, shared)
 
     def descriptor(self):
+        blobs = {b.label: b for b in self.shared}
+        for target in self.targets:
+            for blob in target.inputs + [target.output]:
+                blobs[blob.label] = blob
         return {
+            "version": 2,
             "graph_id": self.graph_id,
             "instance": self.instance,
             "targets": [t.descriptor() for t in self.targets],
             "shared": [b.descriptor() for b in self.shared],
+            "blobs": [blobs[label].descriptor() for label in sorted(blobs)],
             "stats": self.stats(),
         }
+
+    @classmethod
+    def from_descriptor(cls, descriptor):
+        """Reconstruct recorded bytes and edges without guessing generator inputs."""
+        if descriptor.get("version") != 2:
+            raise ValueError("graph descriptor lacks complete blob data; record again with version 2")
+        blobs = {}
+        for row in descriptor["blobs"]:
+            if row["label"] in blobs or type(row["size"]) is not int or row["size"] < 0:
+                raise ValueError("invalid or duplicate blob descriptor")
+            blob = Blob(descriptor["instance"], descriptor["graph_id"], row["label"], row["size"])
+            if blob.descriptor() != row:
+                raise ValueError(f"blob descriptor digest mismatch: {row['label']}")
+            blobs[blob.label] = blob
+        shared = []
+        for row in descriptor["shared"]:
+            blob = blobs[row["label"]]
+            if blob.descriptor() != row:
+                raise ValueError("shared blob descriptor mismatch")
+            shared.append(blob)
+        targets = [Target(t["name"], t["layer"], [blobs[label] for label in t["inputs"]],
+                          t["deps"], t["command"], blobs[t["output"]])
+                   for t in descriptor["targets"]]
+        graph = cls(descriptor["graph_id"], descriptor["instance"], targets, shared)
+        if graph.descriptor() != {k: v for k, v in descriptor.items() if k != "recording"}:
+            raise ValueError("graph descriptor does not match reconstructed graph")
+        return graph
 
     def stats(self):
         logical = 0
@@ -348,7 +388,7 @@ def _operation_cls():
 def build_action_blobs(client, graph, target):
     """Construct the Command/Directory/Action blobs for a target.
 
-    Returns (command_blob, root_blob, action_blob, action_digest). The Action's
+    Returns (command_blob, root_blob, action_blob). The Action's
     digest is what the ActionCache is keyed on, so determinism here is what makes
     the cache hit/miss story reproducible.
     """
@@ -356,17 +396,19 @@ def build_action_blobs(client, graph, target):
         re.Platform.Property(name="OSFamily", value="linux"),
         re.Platform.Property(name="cpu_arch", value="x86_64")])
     cmd = re.Command(arguments=target.command_args, platform=plat,
-                     output_paths=[f"out/{target.name.split(':')[-1]}"])
-    cmd_bytes = cmd.SerializeToString()
+                     output_paths=["out/artifact"])
+    cmd_bytes = cmd.SerializeToString(deterministic=True)
     cmd_blob = _wrap(graph, f"{target.name}/command", cmd_bytes)
 
-    root = re.Directory()
-    root_bytes = root.SerializeToString()
+    inputs = {(b.hash, b.size): b for b in target.inputs}
+    root = re.Directory(files=[re.FileNode(name=f"input-{h}-{size}", digest=inputs[h, size].digest())
+                               for h, size in sorted(inputs)])
+    root_bytes = root.SerializeToString(deterministic=True)
     root_blob = _wrap(graph, f"{target.name}/root", root_bytes)
 
     action = re.Action(command_digest=cmd_blob.digest(), input_root_digest=root_blob.digest(),
                        platform=plat)
-    action_bytes = action.SerializeToString()
+    action_bytes = action.SerializeToString(deterministic=True)
     action_blob = _wrap(graph, f"{target.name}/action", action_bytes)
     return cmd_blob, root_blob, action_blob
 
@@ -410,10 +452,10 @@ class Driver:
     def _emit(self, method, request, response):
         if self.trace is None:
             return
-        row = {"seq": len(self.trace), "method": method,
-               "atSeconds": round(time.monotonic() - self.start, 6),
-               "request": request, "response": response}
         with self.lock:
+            row = {"seq": len(self.trace), "method": method,
+                   "atSeconds": round(time.monotonic() - self.start, 6),
+                   "request": request, "response": response}
             self.trace.append(row)
 
     def _ensure_present(self, blobs):
@@ -426,14 +468,30 @@ class Driver:
         self._emit(MISSING, {"digests": [b.descriptor() for b in blist]},
                    {"missing": [{"sha256": h, "size": s} for (h, s) in sorted(missing)]})
         self.stats["findMissing"] += 1
+        if not missing <= unique.keys():
+            raise ValueError("FindMissingBlobs returned an unrequested digest")
         for key, b in unique.items():
             if key in missing:
                 committed = self.client.upload(b)
                 self._emit(WRITE, {"sha256": b.hash, "size": b.size},
                            {"committedBytes": committed})
+                if committed != b.size:
+                    raise ValueError(f"Write committed {committed} bytes, expected {b.size}")
+                total, got_hash = self.client.read(b)
+                ok = total == b.size and got_hash == b.hash
+                self._emit(READ, {"sha256": b.hash, "size": b.size},
+                           {"bytes": total, "sha256": got_hash, "verified": ok})
+                if not ok:
+                    raise ValueError("uploaded blob failed readback integrity")
                 self.stats["upload"] += 1
                 with self.lock:
                     self.uploaded.add(key)
+        if missing:
+            remaining = self.client.find_missing(blist)
+            self._emit(MISSING, {"digests": [b.descriptor() for b in blist]},
+                       {"missing": [{"sha256": h, "size": s} for h, s in sorted(remaining)]})
+            if remaining:
+                raise ValueError("FindMissingBlobs reports absence after completed uploads")
 
     def run_target(self, target):
         try:
@@ -443,6 +501,9 @@ class Driver:
             with self.lock:
                 self.errors.append({"target": target.name, "code": err.code().name,
                                     "details": err.details()[:400]})
+        except ValueError as err:
+            with self.lock:
+                self.errors.append({"target": target.name, "error": str(err)})
 
     def _run_target(self, target):
         cmd_blob, root_blob, action_blob = build_action_blobs(self.client, self.graph, target)
@@ -452,8 +513,11 @@ class Driver:
         # 2) GetActionResult -- expect a miss on first encounter.
         result, miss_code = self.client.get_action_result(action_blob.digest())
         hit = result is not None
+        if not hit and miss_code != grpc.StatusCode.NOT_FOUND:
+            raise ValueError(f"GetActionResult failed: {miss_code}; not a cache miss")
         self._emit(GET_AC, {"actionDigest": action_blob.descriptor()},
-                   {"hit": hit, "missCode": None if hit else miss_code.name})
+                   {"hit": hit, "missCode": None if hit else miss_code.name,
+                    "result": result.SerializeToString(deterministic=True).hex() if hit else None})
         self.stats["acHit" if hit else "acMiss"] += 1
 
         if hit:
@@ -467,6 +531,11 @@ class Driver:
             op = self.client.execute(action_blob.digest())
             self._emit(EXECUTE, {"actionDigest": action_blob.descriptor()},
                        {"operation": op.name if op else None, "done": bool(op and op.done)})
+            if not op or not op.done or op.HasField("error"):
+                raise ValueError("Execute did not complete successfully")
+            response = re.ExecuteResponse()
+            if not op.response.Unpack(response) or response.status.code or response.result.exit_code:
+                raise ValueError("Execute returned an invalid or unsuccessful response")
             self.stats["execute"] += 1
 
         # 4) publish the output blob + UpdateActionResult (synthesize a result).
@@ -482,7 +551,8 @@ class Driver:
         result2, miss2 = self.client.get_action_result(action_blob.digest())
         hit2 = result2 is not None
         self._emit(GET_AC, {"actionDigest": action_blob.descriptor()},
-                   {"hit": hit2, "missCode": None if hit2 else miss2.name})
+                   {"hit": hit2, "missCode": None if hit2 else miss2.name,
+                    "result": result2.SerializeToString(deterministic=True).hex() if hit2 else None})
         if hit2:
             self.stats["acHitAfterPut"] += 1
             self._verify_cached_output(target, result2)
@@ -493,6 +563,9 @@ class Driver:
 
     def _verify_cached_output(self, target, action_result):
         """Read every cached output blob back and confirm bytes match the digest."""
+        expected = make_action_result(target.output)
+        if action_observation(action_result) != action_observation(expected):
+            raise ValueError("cached ActionResult differs from the expected target output")
         for of in action_result.output_files:
             d = of.digest
             probe = Blob.__new__(Blob)
@@ -544,26 +617,25 @@ class Replayer:
 
     def _blob(self, h, size):
         b = self.by_hash.get(h)
-        if b is not None:
+        if b is not None and b.size == size:
             return b
-        probe = Blob.__new__(Blob)
-        probe.instance = self.graph.instance
-        probe.hash = h
-        probe.size = size
-        probe.label = f"unknown/{h[:12]}"
-        probe.data = b""
-        return probe
+        raise ValueError(f"trace refers to a blob absent from the graph: {h}/{size}")
 
     def run(self):
         mism = []
         counts = collections.Counter()
+        replayed = 0
+        skipped = 0
         for row in self.rows:
             method = row["method"]
             req, rec = row["request"], row["response"]
             counts[method.rsplit("/", 1)[-1]] += 1
             if method == WRITE:
                 blob = self._blob(req["sha256"], req["size"])
-                self.client.upload(blob)
+                committed = self.client.upload(blob)
+                if committed != blob.size or committed != rec["committedBytes"]:
+                    mism.append({"seq": row["seq"], "method": "Write",
+                                 "note": "committed size mismatch", "observed": committed})
             elif method == MISSING:
                 blobs = [self._blob(d["sha256"], d["size"]) for d in req["digests"]]
                 missing = self.client.find_missing(blobs)
@@ -580,27 +652,47 @@ class Replayer:
                 blob = self._blob(req["actionDigest"]["sha256"], req["actionDigest"]["size"])
                 result, code = self.client.get_action_result(blob.digest())
                 hit = result is not None
+                if not hit and code != grpc.StatusCode.NOT_FOUND:
+                    mism.append({"seq": row["seq"], "method": "GetActionResult",
+                                 "note": "RPC failed", "code": code.name if code else None})
                 # By the time we replay, the AC entry should exist whenever the
                 # recording ultimately observed it as a hit for that action.
                 if rec.get("hit") and not hit:
                     mism.append({"seq": row["seq"], "method": "GetActionResult",
                                  "note": "recorded hit but replay miss",
                                  "action": blob.hash, "code": code.name if code else None})
+                elif rec.get("hit") and hit:
+                    expected = re.ActionResult.FromString(bytes.fromhex(rec["result"]))
+                    if action_observation(result) != action_observation(expected):
+                        mism.append({"seq": row["seq"], "method": "GetActionResult",
+                                     "note": "cached result differs from recording"})
             elif method == UPDATE_AC:
                 action = self._blob(req["actionDigest"]["sha256"], req["actionDigest"]["size"])
                 out = self._blob(req["outputDigest"]["sha256"], req["outputDigest"]["size"])
-                self.client.upload(out)
-                self.client.update_action_result(action.digest(), make_action_result(out))
+                if self.client.upload(out) != out.size:
+                    mism.append({"seq": row["seq"], "method": "UpdateActionResult",
+                                 "note": "output upload committed size mismatch"})
+                expected = make_action_result(out)
+                result = self.client.update_action_result(action.digest(), expected)
+                if action_observation(result) != action_observation(expected):
+                    mism.append({"seq": row["seq"], "method": "UpdateActionResult",
+                                 "note": "updated result differs from request"})
             elif method == READ:
                 blob = self._blob(req["sha256"], req["size"])
                 total, got = self.client.read(blob)
-                if got != req["sha256"]:
+                if (got != req["sha256"] or total != req["size"]
+                        or got != rec["sha256"] or total != rec["bytes"]):
                     mism.append({"seq": row["seq"], "method": "Read",
                                  "note": "readback digest mismatch",
                                  "expected": req["sha256"], "got": got, "bytes": total})
             elif method == EXECUTE:
-                pass  # execution is environment-dependent; not replayed by default
-        return {"replayed": len(self.rows), "methods": dict(counts), "mismatches": mism}
+                skipped += 1
+                continue  # Execution is environment-dependent and explicitly excluded.
+            else:
+                mism.append({"seq": row["seq"], "method": method, "note": "unsupported trace method"})
+                continue
+            replayed += 1
+        return {"replayed": replayed, "skipped": skipped, "methods": dict(counts), "mismatches": mism}
 
 
 # --------------------------------------------------------------------------- #
@@ -623,6 +715,25 @@ def read_jsonl(path):
         return [json.loads(line) for line in fh if line.strip()]
 
 
+def recorded_graph(graph, rows, report):
+    descriptor = graph.descriptor()
+    if rows is not None:
+        payload = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+        descriptor["recording"] = {"rpcs": len(rows), "sha256": sha256_hex(payload),
+                                   "successful": not report["errors"]}
+    return descriptor
+
+
+def verify_recording(descriptor, rows):
+    manifest = descriptor.get("recording")
+    if not manifest or not manifest.get("successful"):
+        raise ValueError("replay requires a successful recording with a trace manifest")
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    if (manifest.get("rpcs") != len(rows) or manifest.get("sha256") != sha256_hex(payload)
+            or [row.get("seq") for row in rows] != list(range(len(rows)))):
+        raise ValueError("recorded trace is incomplete, reordered, or changed")
+
+
 # --------------------------------------------------------------------------- #
 # Subcommands
 # --------------------------------------------------------------------------- #
@@ -641,7 +752,7 @@ def cmd_generate(args):
     }
     print(json.dumps(summary, indent=2))
     if args.graph_out:
-        write_json(pathlib.Path(args.graph_out), graph.descriptor())
+        write_json(pathlib.Path(args.graph_out), recorded_graph(graph, trace, report))
     if args.summary_out:
         write_json(pathlib.Path(args.summary_out), summary)
     if trace is not None and args.trace:
@@ -656,7 +767,7 @@ def cmd_record(args):
     driver = Driver(client, graph, args, trace=trace)
     report = driver.drive()
     write_jsonl(pathlib.Path(args.trace), trace)
-    write_json(pathlib.Path(args.graph_out), graph.descriptor())
+    write_json(pathlib.Path(args.graph_out), recorded_graph(graph, trace, report))
     summary = {"endpoint": client.address, "seed": args.seed,
                "trace": args.trace, "graphOut": args.graph_out,
                "rpcs": len(trace), "graph": graph.descriptor()["stats"], **report}
@@ -667,26 +778,16 @@ def cmd_record(args):
 def cmd_replay(args):
     rows = read_jsonl(pathlib.Path(args.trace))
     graph_desc = json.loads(pathlib.Path(args.graph).read_text())
-    # Re-synthesize the exact graph from its recorded parameters so blob bytes
-    # (and therefore digests) are reconstructed deterministically.
-    synth_args = argparse.Namespace(
-        seed=args.seed, graph_id=graph_desc["graph_id"], instance=graph_desc["instance"],
-        targets=graph_desc["stats"]["targets"], layers=graph_desc["stats"]["layers"],
-        shared_inputs=len(graph_desc["shared"]),
-        max_inputs=max((len(t["inputs"]) for t in graph_desc["targets"]), default=1),
-        max_deps=max((len(t["deps"]) for t in graph_desc["targets"]), default=1))
-    graph = BuildGraph.synthesize(synth_args)
-    # Guard: the re-synthesized graph must match the recorded descriptor exactly.
-    if graph.descriptor()["stats"]["uniqueBlobs"] != graph_desc["stats"]["uniqueBlobs"]:
-        print(json.dumps({"error": "re-synthesized graph does not match recorded graph; "
-                          "pass the same --seed/--graph used to record"}, indent=2))
-        return 2
+    verify_recording(graph_desc, rows)
+    graph = BuildGraph.from_descriptor(graph_desc)
+    if args.instance != graph.instance:
+        raise ValueError("replay instance must match the recorded graph")
     client = Client(args.host, args.port, args.instance)
     report = Replayer(client, graph, rows).run()
     summary = {"endpoint": client.address, "trace": args.trace, **report,
-               "roundTripOk": not report["mismatches"]}
+               "roundTripOk": not report["mismatches"] and not report["skipped"]}
     print(json.dumps(summary, indent=2))
-    return 0 if not report["mismatches"] else 1
+    return 1 if report["mismatches"] else (2 if report["skipped"] else 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -742,14 +843,18 @@ def main(argv=None):
     p = sub.add_parser("replay", help="re-drive a recorded trace and verify integrity")
     _add_endpoint(p)
     p.add_argument("--seed", type=int, default=20261002,
-                   help="seed used when recording (must match)")
+                   help="legacy option; version 2 graphs contain complete reconstruction data")
     p.add_argument("--trace", required=True, help="trace JSONL to replay")
     p.add_argument("--graph", required=True,
                    help="graph descriptor JSON produced by record/generate")
     p.set_defaults(func=cmd_replay)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, KeyError, OSError, grpc.RpcError) as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ import pathlib
 import sys
 import uuid
 
+from reapi_values import action_observation
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The independent Python gRPC runtime and generated bindings live under
 # .build/python (see scripts/test.sh), mirroring test/integration.py.
@@ -183,6 +185,10 @@ def transport(error):
     return error.code() in TRANSPORT_CODES
 
 
+def error_status(error):
+    return UNSUPPORTED if unimplemented(error) else (SKIP if transport(error) else FAIL)
+
+
 # --------------------------------------------------------------------------- #
 # Probes. Each takes (harness, context) and returns one or more Checks. ``context``
 # is a mutable dict shared across probes so earlier discoveries (e.g. advertised
@@ -293,7 +299,7 @@ def probe_find_missing(h, ctx):
                           UNSUPPORTED, "FindMissingBlobs not implemented",
                           {"code": error.code().name})]
         return [Check("cas.fmb", "cas", "FindMissingBlobs integrity",
-                      FAIL, f"errored: {error.code().name}",
+                      error_status(error), f"errored: {error.code().name}",
                       {"code": error.code().name, "details": error.details()[:200]})]
     missing = {(d.hash, d.size_bytes) for d in reply.missing_blob_digests}
     expected = {(dig_a, n_a)}
@@ -326,7 +332,8 @@ def probe_committed_size_honesty(h, ctx):
                           PASS, "Write committed_size correct (QueryWriteStatus absent)",
                           {"writeCommitted": committed})]
         return [Check("bs.committed", "bytestream", "Committed-size honesty",
-                      FAIL, f"QueryWriteStatus errored: {error.code().name}",
+                      SKIP if error.code() == grpc.StatusCode.NOT_FOUND else error_status(error),
+                      f"QueryWriteStatus errored: {error.code().name}",
                       {"code": error.code().name})]
     ok = q.complete and q.committed_size == n
     evidence = {"declared": n, "writeCommitted": committed,
@@ -353,12 +360,13 @@ def probe_query_write_status(h, ctx):
                           UNSUPPORTED, "QueryWriteStatus not implemented",
                           {"code": error.code().name})]
         return [Check("bs.qws", "bytestream", "QueryWriteStatus sanity",
-                      FAIL, f"errored: {error.code().name}", {"code": error.code().name})]
+                      SKIP if error.code() == grpc.StatusCode.NOT_FOUND else error_status(error),
+                      f"errored: {error.code().name}", {"code": error.code().name})]
     evidence = {"complete": q.complete, "committedSize": q.committed_size, "declared": n}
-    ok = q.complete and 0 <= q.committed_size <= n
+    ok = q.complete and q.committed_size == n
     return [Check("bs.qws", "bytestream", "QueryWriteStatus sanity",
                   PASS if ok else FAIL,
-                  "reports complete with in-range committed size" if ok
+                  "reports complete with exact committed size" if ok
                   else "complete/committed inconsistent", evidence)]
 
 
@@ -382,6 +390,7 @@ def probe_range_reads(h, ctx):
     ]
     results = []
     all_ok = True
+    incorrect = False
     for label, off, lim, expect in cases:
         try:
             got = h.read(dig, n, offset=off, limit=lim)
@@ -389,12 +398,14 @@ def probe_range_reads(h, ctx):
             results.append({"case": label, "offset": off, "limit": lim,
                             "gotBytes": len(got), "expectBytes": len(expect), "ok": ok})
             all_ok = all_ok and ok
+            incorrect = incorrect or not ok
         except grpc.RpcError as error:
             results.append({"case": label, "offset": off, "limit": lim,
                             "error": error.code().name})
             all_ok = False
+            incorrect = incorrect or not (transport(error) or unimplemented(error))
     return [Check("bs.range", "bytestream", "Range-read correctness",
-                  PASS if all_ok else FAIL,
+                  PASS if all_ok else (FAIL if incorrect else SKIP),
                   "all range cases correct (incl. past-EOF)" if all_ok
                   else "one or more range cases incorrect",
                   {"cases": results})]
@@ -464,9 +475,13 @@ def probe_integrity(h, ctx):
     except grpc.RpcError as error:
         return [Check("integrity.write", "integrity",
                       "Rejects bytes that do not match the digest",
-                      PASS, "mismatched upload accepted but not readable",
+                      (SKIP if transport(error) or unimplemented(error) else
+                       PASS if error.code() in {grpc.StatusCode.NOT_FOUND, grpc.StatusCode.DATA_LOSS,
+                                               grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.FAILED_PRECONDITION}
+                       else SKIP),
+                      "mismatched upload readback failed; see readError",
                       {"committed": committed, "readError": error.code().name})]
-    violated = got == wrong and digest_bytes(got) != dig
+    violated = digest_bytes(got) != dig or len(got) != n
     evidence = {"claimedDigest": dig, "servedSha256": digest_bytes(got),
                 "committed": committed, "servedWrongBytes": got == wrong}
     return [Check("integrity.write", "integrity",
@@ -479,9 +494,24 @@ def probe_integrity(h, ctx):
 def probe_action_cache(h, ctx):
     """ActionCache put/get round-trip. The AC is a mutable last-writer-wins
     register keyed by action digest; we write an ActionResult and read it back."""
-    key = hashlib.sha256(f"{h.seed}/ac-action".encode()).hexdigest()
-    action_digest = re.Digest(hash=key, size_bytes=42)
-    result = re.ActionResult(exit_code=7)
+    # A valid AC update requires its Action and Command to exist in CAS.
+    command = re.Command(arguments=["/bin/true", str(h.seed)])
+    command_data = command.SerializeToString(deterministic=True)
+    root_data = re.Directory().SerializeToString(deterministic=True)
+    action = re.Action(command_digest=re.Digest(hash=digest_bytes(command_data), size_bytes=len(command_data)),
+                       input_root_digest=re.Digest(hash=digest_bytes(root_data), size_bytes=len(root_data)))
+    action_data = action.SerializeToString(deterministic=True)
+    try:
+        for label, data in (("command", command_data), ("root", root_data), ("action", action_data)):
+            _, committed = h.write(data, digest_bytes(data), len(data), "ac-" + label)
+            if committed != len(data):
+                return [Check("ac.update", "actioncache", "UpdateActionResult", SKIP,
+                              "prerequisite upload reported wrong size", {})]
+    except grpc.RpcError as error:
+        return [Check("ac.update", "actioncache", "UpdateActionResult", SKIP,
+                      f"prerequisite upload failed: {error.code().name}", {})]
+    action_digest = re.Digest(hash=digest_bytes(action_data), size_bytes=len(action_data))
+    result = re.ActionResult(exit_code=0)
     try:
         updated = h.ac.UpdateActionResult(re.UpdateActionResultRequest(
             instance_name=h.instance, action_digest=action_digest,
@@ -500,7 +530,8 @@ def probe_action_cache(h, ctx):
                 Check("ac.get", "actioncache", "GetActionResult",
                       SKIP, "skipped: AC update failed", {})]
     checks = [Check("ac.update", "actioncache", "UpdateActionResult",
-                    PASS, f"stored ActionResult (exit_code={updated.exit_code})",
+                    PASS if action_observation(updated) == action_observation(result) else FAIL,
+                    f"returned ActionResult (exit_code={updated.exit_code})",
                     {"exitCode": updated.exit_code})]
     try:
         got = h.ac.GetActionResult(re.GetActionResultRequest(
@@ -513,15 +544,15 @@ def probe_action_cache(h, ctx):
                                 {"code": error.code().name}))
         else:
             checks.append(Check("ac.get", "actioncache", "GetActionResult",
-                                FAIL, f"errored: {error.code().name}",
+                                error_status(error), f"errored: {error.code().name}",
                                 {"code": error.code().name}))
         return checks
-    ok = got.exit_code == result.exit_code
+    ok = action_observation(got) == action_observation(result)
     checks.append(Check("ac.get", "actioncache", "GetActionResult",
                         PASS if ok else FAIL,
                         "round-trips stored ActionResult" if ok
-                        else f"read-back exit_code {got.exit_code} != {result.exit_code}",
-                        {"storedExitCode": result.exit_code, "readExitCode": got.exit_code}))
+                        else "read-back ActionResult differs from the stored value",
+                        {"stored": action_observation(result), "read": action_observation(got)}))
     return checks
 
 
@@ -574,7 +605,10 @@ def probe_batch(h, ctx):
                       SKIP, "skipped: batch update failed", {}),
                 Check("batch.limit", "batch", "max_batch_total_size_bytes advertised",
                       SKIP, "skipped: batch update failed", {})]
-    update_ok = all(r.status.code == 0 for r in up.responses) and len(up.responses) == len(blobs)
+    expected_digests = {(d, n) for _, d, n in blobs}
+    update_ok = (all(r.status.code == 0 for r in up.responses)
+                 and len(up.responses) == len(blobs)
+                 and {(r.digest.hash, r.digest.size_bytes) for r in up.responses} == expected_digests)
     checks.append(Check("batch.update", "batch", "BatchUpdateBlobs",
                         PASS if update_ok else FAIL,
                         f"stored {len(up.responses)} blob(s)" if update_ok
@@ -592,14 +626,14 @@ def probe_batch(h, ctx):
                                 {"code": error.code().name}))
         else:
             checks.append(Check("batch.read", "batch", "BatchReadBlobs",
-                                FAIL, f"errored: {error.code().name}",
+                                error_status(error), f"errored: {error.code().name}",
                                 {"code": error.code().name}))
     else:
-        by_hash = {r.digest.hash: r for r in rd.responses}
-        read_ok = True
+        by_digest = {(r.digest.hash, r.digest.size_bytes): r for r in rd.responses}
+        read_ok = len(rd.responses) == len(blobs) and set(by_digest) == expected_digests
         detail_rows = []
         for (data, d, n) in blobs:
-            r = by_hash.get(d)
+            r = by_digest.get((d, n))
             good = r is not None and r.status.code == 0 and r.data == data
             read_ok = read_ok and good
             detail_rows.append({"hash": d[:12], "ok": good,

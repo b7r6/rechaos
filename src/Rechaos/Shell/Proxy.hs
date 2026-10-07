@@ -29,7 +29,7 @@ module Rechaos.Shell.Proxy (
 
 import Control.Concurrent.Async
 import Control.Exception
-import Control.Monad (forM_, void)
+import Control.Monad (void)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -106,11 +106,17 @@ handler runtime connection maxSeconds = S.someRpcHandler $
                       (throwIO . grpcException GrpcInvalidArgument . T.pack)
                       pure
                       (payloadChunks method direction chunk bytes)
-                  forM_ parts $ \(n, part) -> do
-                    micros <-
-                      maybe (throwIO (grpcException GrpcInvalidArgument "zero dribble rate")) pure (dribbleMicros rate n)
-                    sleepMicros micros
-                    send part
+                  let pace _ _ [] = pure ()
+                      pace delivered previous ((n, part) : rest) = do
+                        cumulative <-
+                          maybe
+                            (throwIO (grpcException GrpcInvalidArgument "zero dribble rate"))
+                            pure
+                            (dribbleMicros rate (delivered + n))
+                        sleepMicros (cumulative - previous)
+                        send part
+                        pace (delivered + n) cumulative rest
+                  pace 0 0 parts
                   pure False
                 Just (Truncate keep) -> do
                   shortened <-

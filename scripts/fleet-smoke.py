@@ -9,7 +9,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT / "test"))
-from integration import grpc, re, DATA, READ, MISSING, digest, write, read, contents, proxy, rule
+from integration import binary, grpc, re, DATA, READ, MISSING, digest, write, read, contents, proxy, rule
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--host", required=True)
@@ -38,7 +38,7 @@ with proxy(opts.port,out/"truncate",[rule(READ,"response",{"kind":"truncate","ke
     for name,data in [("clean-output",clean),("chaos-output",torn)]:
         (out/name).mkdir(exist_ok=True)
         (out/name/"artifact").write_bytes(data)
-    result=subprocess.run([str(ROOT/"bin/rechaos"),"oracle",str(out/"clean-output"),str(out/"chaos-output")],capture_output=True,text=True)
+    result=subprocess.run([binary(),"oracle",str(out/"clean-output"),str(out/"chaos-output")],capture_output=True,text=True)
     assert result.returncode==1, result.stderr
     results["oracle"]=json.loads(result.stdout)
 with proxy(opts.port,out/"replay",replay=timeline,upstream_host=opts.host) as (channel,_,_):

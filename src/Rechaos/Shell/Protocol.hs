@@ -133,21 +133,17 @@ blobSize method bytes
         (sumSizes . map (^. R.digest . R.sizeBytes) . (^. R.requests))
         (decode bytes :: Either String RE.BatchUpdateBlobsRequest)
   | method == getActionResultMethod =
-      -- Request carries the action digest; response (ActionResult) carries the
-      -- cached output digests. blobSize is direction-agnostic here, so try the
-      -- request first and fall back to the response.
-      case getActionResultRequestSize bytes of
-        Just n -> Just n
-        Nothing -> actionResultSizes bytes
+      getActionResultRequestSize bytes
   | method == updateActionResultMethod =
-      -- The ActionResult appears in both the request and the response; decode it
-      -- directly as the response shape, which the request also embeds.
-      actionResultSizes bytes
+      either
+        (const Nothing)
+        (sumSizes . actionResultDigestSizes . (^. R.actionResult))
+        (decode bytes :: Either String RE.UpdateActionResultRequest)
   | method == getTreeMethod =
       either
         (const Nothing)
-        (sumSizes . concatMap directorySizes . (^. R.directories))
-        (decode bytes :: Either String RE.GetTreeResponse)
+        (sumSizes . pure . (^. R.rootDigest . R.sizeBytes))
+        (decode bytes :: Either String RE.GetTreeRequest)
   | otherwise = Nothing
  where
   sizes req = sumSizes (map (^. R.sizeBytes) (req ^. R.blobDigests))
@@ -157,18 +153,11 @@ blobSize method bytes
       (const Nothing)
       (\req -> sumSizes [req ^. R.actionDigest . R.sizeBytes])
       (decode bs :: Either String RE.GetActionResultRequest)
-  actionResultSizes bs =
-    either
-      (const Nothing)
-      (sumSizes . actionResultDigestSizes)
-      (decode bs :: Either String RE.ActionResult)
   actionResultDigestSizes r =
     map (^. R.digest . R.sizeBytes) (r ^. R.outputFiles)
+      ++ map (^. R.treeDigest . R.sizeBytes) (r ^. R.outputDirectories)
       ++ maybe [] (\d -> [d ^. R.sizeBytes]) (r ^. R.maybe'stdoutDigest)
       ++ maybe [] (\d -> [d ^. R.sizeBytes]) (r ^. R.maybe'stderrDigest)
-  directorySizes dir =
-    map (^. R.digest . R.sizeBytes) (dir ^. R.files)
-      ++ map (^. R.digest . R.sizeBytes) (dir ^. R.directories)
 
 {- | The size in bytes of the bulk payload carried by a single message. For a
 ByteStream @Read@ response or @Write@ request it is the length of the decoded

@@ -28,7 +28,7 @@ module Rechaos.Shell.Oracle (
   putVerdict,
 ) where
 
-import Control.Exception (evaluate)
+import Control.Exception (IOException, catch, evaluate)
 import Control.Monad (forM, unless)
 import Data.Aeson (Value, encode, object, (.=))
 import Data.Bits ((.&.))
@@ -41,12 +41,13 @@ import Rechaos.Core.Oracle
 import Rechaos.Shell.Protocol (sha256)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
-import System.IO (IOMode (ReadMode), withBinaryFile)
+import System.IO (IOMode (ReadMode), hPutStrLn, stderr, withBinaryFile)
 import System.Posix.Files
 
 {- | Walk an output directory and hash it into a pure 'Tree', recording each
-regular file's digest, size, and executable bit, following no symlinks and
-failing if any node changes while it is being read.
+regular file's digest, size, and executable bit. Symlink entries record their
+targets. Metadata checks detect changes during traversal; this is not an atomic
+filesystem snapshot, so callers must supply quiescent completed output trees.
 -}
 snapshot :: FilePath -> IO Tree
 snapshot root = do
@@ -118,4 +119,8 @@ oracleJSON (Diverged changes) =
 'Verdict' for whether the second (chaos) build diverged from the first (clean).
 -}
 compareTrees :: FilePath -> FilePath -> IO Verdict
-compareTrees a b = compareBuilds <$> (Built <$> snapshot a) <*> (Built <$> snapshot b)
+compareTrees a b =
+  (compareBuilds <$> (Built <$> snapshot a) <*> (Built <$> snapshot b)) `catch` inconclusive
+ where
+  inconclusive :: IOException -> IO Verdict
+  inconclusive e = hPutStrLn stderr ("oracle snapshot failed: " ++ show e) >> pure Inconclusive

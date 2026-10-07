@@ -10,7 +10,7 @@ import tempfile
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"test"))
-from integration import DATA, grpc, proxy, read, contents
+from integration import binary, DATA, grpc, proxy, read, contents
 
 parser=argparse.ArgumentParser()
 parser.add_argument("--host",required=True)
@@ -22,7 +22,7 @@ try:
         with proxy(opts.port,temp,replay=os.environ["RECHAOS_TIMELINE"],sparse=True,upstream_host=opts.host) as (channel,observed,_):
             call=read(channel)
             data=contents(call)
-            coverage=subprocess.run([str(ROOT/"bin/rechaos"),"verify-replay",os.environ["RECHAOS_TIMELINE"],str(observed)],capture_output=True)
+            coverage=subprocess.run([binary(),"verify-replay",os.environ["RECHAOS_TIMELINE"],str(observed)],capture_output=True)
             if coverage.returncode==0 and call.code()==grpc.StatusCode.OK:
                 verdict={"verdict":"triggers","signature":"fleet-torn-read"} if data!=DATA else {"verdict":"does-not-trigger"}
 except grpc.RpcError:

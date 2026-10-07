@@ -11,14 +11,12 @@ those live here, in the frame/flow-control machinery.
 
 Why raw sockets, no `h2`/`hyperframe`
 -------------------------------------
-This proxy prefers the `h2`/`hyperframe` libraries if they are importable, but
-under `nix develop` on this repo they are NOT present (only `grpcio`). So the
-default and fully-supported path is a from-scratch, stdlib-only HTTP/2 framing
-layer. We deliberately do NOT maintain HPACK state or re-encode HEADERS: we
+This proxy uses a stdlib-only HTTP/2 framing layer. We deliberately do NOT
+maintain HPACK state or re-encode HEADERS: we
 splice the connection at the *frame* boundary and forward every frame's bytes
 verbatim unless a fault rule says otherwise. This keeps HPACK dynamic tables on
-both peers consistent (we never drop or reorder a HEADERS/CONTINUATION frame,
-which would desync the decoder) while still letting us:
+both peers consistent except when explicitly requesting header-truncate,
+which can desync the decoder, while still letting us:
 
   * fabricate brand-new frames (RST_STREAM, GOAWAY, PING, WINDOW_UPDATE),
   * drop/delay whole frames (SETTINGS, WINDOW_UPDATE, PING),
@@ -223,7 +221,7 @@ class FaultEngine:
         self.rng = random.Random(opts.seed)
         self.rng_lock = threading.Lock()
         # Per-connection mutable state.
-        self.reorder_buf = {}   # direction -> list[Frame] held for reordering
+        self.reorder_buf = {}   # (direction, stream_id) -> held DATA frames
         self.goaway_sent = {}   # direction -> bool
         self.ping_last = {}     # direction -> monotonic of last injected ping
 
@@ -356,40 +354,58 @@ class FaultEngine:
             if self._dir_match(direction) and self._stream_match(frame.stream_id) and frame.stream_id != 0:
                 return self._reorder_data(frame, direction)
 
+        # gRPC commonly closes with trailers rather than END_STREAM on DATA.
+        # Release this stream's remaining DATA before its terminal frame.
+        if fault == "data-reorder" and (frame.flags & FLAG_END_STREAM or frame.ftype == FRAME_RST_STREAM):
+            pending = self.reorder_buf.pop((direction, frame.stream_id), [])
+            if frame.ftype == FRAME_RST_STREAM:
+                return [frame.raw]
+            return [f.raw for f in reversed(pending)] + [frame.raw]
+
         # default: pass through untouched
         return [frame.raw]
 
     # --------------------------------------------------------------------- #
     def _fragment_data(self, frame):
         size = max(1, self.opts.fragment)
-        chunks = [frame.payload[i:i + size] for i in range(0, len(frame.payload), size)]
+        payload = frame.payload
+        flags = frame.flags
+        if flags & FLAG_PADDED:
+            if not payload or payload[0] >= len(payload):
+                return [frame.raw]  # leave malformed input to the receiving peer
+            payload = payload[1:len(payload) - payload[0]]
+            flags &= ~FLAG_PADDED
+        chunks = [payload[i:i + size] for i in range(0, len(payload), size)] or [b""]
         out = []
         for i, c in enumerate(chunks):
             last = i == len(chunks) - 1
-            flags = frame.flags if last else (frame.flags & ~FLAG_END_STREAM)
-            out.append(build_frame(FRAME_DATA, flags, frame.stream_id, c))
+            chunk_flags = flags if last else (flags & ~FLAG_END_STREAM)
+            out.append(build_frame(FRAME_DATA, chunk_flags, frame.stream_id, c))
         self.stats.inject(f"DATA-fragment(x{len(chunks)})")
         self.log(f"[fragment] DATA stream={frame.stream_id} -> {len(chunks)} frames "
                  f"of <= {size}B (flow-control/reassembly)")
         return out
 
     def _reorder_data(self, frame, direction):
-        buf = self.reorder_buf.setdefault(direction, [])
+        key = (direction, frame.stream_id)
+        buf = self.reorder_buf.setdefault(key, [])
+        active = self._active(direction, frame.stream_id)
         # If this frame ends the stream, flush held frames in reverse order
         # (the reordering) followed by this one.
-        if frame.flags & FLAG_END_STREAM:
-            buf.append(frame)
-            out = [f.raw for f in reversed(buf)]
-            self.stats.inject(f"DATA-reorder(x{len(buf)})")
-            self.log(f"[reorder] flush {len(buf)} DATA frames reversed stream={frame.stream_id}")
-            buf.clear()
+        # A probability miss also releases held frames before passing through,
+        # so an unselected final frame cannot overtake buffered data.
+        if frame.flags & FLAG_END_STREAM or not active:
+            out = [f.raw for f in reversed(buf)] + [frame.raw]
+            if buf:
+                self.stats.inject(f"DATA-reorder(x{len(buf)})")
+            self.reorder_buf.pop(key)
             return out
         buf.append(frame)
         if len(buf) >= max(2, self.opts.count):
             out = [f.raw for f in reversed(buf)]
             self.stats.inject(f"DATA-reorder(x{len(buf)})")
             self.log(f"[reorder] flush {len(buf)} DATA frames reversed stream={frame.stream_id}")
-            buf.clear()
+            self.reorder_buf.pop(key)
             return out
         return []  # held
 

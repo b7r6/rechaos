@@ -29,11 +29,10 @@ What it does
 
 Determinism
 -----------
-With a fixed ``--seed`` the *workload plan* (which op each logical step is, what
-blob size it uses, which previously-written key it reads) is fully reproducible:
-every worker derives its decisions from ``random.Random(seed + worker_index)``.
-Latencies themselves are obviously not deterministic -- they are what we measure
--- but the *stimulus* is, which is what a regression comparison needs.
+Each worker seeds its operation/size RNG with ``seed + worker_index``.
+Fresh UUIDs, a shared successful-write pool, failures, and allocation of the
+shared operation budget make the full stimulus timing-dependent. This is a
+statistical load generator, not an exact workload replayer.
 
 Regression oracle
 -----------------
@@ -361,12 +360,13 @@ class _OpBudget:
 
 
 def _make_blob(rng: random.Random, size: int) -> bytes:
-    """Generate a unique blob of the requested size.
+    """Generate a fresh sampled blob of the requested size.
 
-    Prefixed with a random token so every write is a distinct digest (exercising
-    the write path), then padded deterministically from the RNG stream.
+    Put random bytes first so tiny blobs do not all become the constant prefix
+    of a textual label. Small payloads can still collide; uniqueness is not
+    possible to guarantee over a finite byte domain.
     """
-    token = f"rechaos-load-{uuid.uuid4()}-".encode()
+    token = uuid.uuid4().bytes
     if size <= len(token):
         return token[:max(size, 1)]
     body = bytes(rng.getrandbits(8) for _ in range(min(size - len(token), 4096)))
@@ -645,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     load.add_argument("--warmup", type=int, default=0,
                       help="untimed ops per client before measurement begins")
     load.add_argument("--seed", type=int, default=1234,
-                      help="RNG seed for a deterministic workload plan")
+                      help="RNG seed for per-worker operation and size draws")
     load.add_argument("--timeout", type=float, default=15.0,
                       help="per-RPC timeout (seconds)")
 

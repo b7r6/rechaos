@@ -6,15 +6,16 @@ fresh seed, then either (a) generates a randomized fault policy and drives
 traffic through the `rechaos serve` gateway, or (b) runs a randomized hostile
 direct client. Every result is checked against a fixed set of correctness and
 liveness invariants. Violations are deduplicated by signature, printed, and
-frozen to a corpus with enough evidence to reproduce (policy + gateway timeline
-for proxy findings; seed + scenario for direct findings).
+frozen as evidence (policy + gateway timeline when available for proxy findings;
+scenario evidence for direct findings). Reproduction still requires matching
+workload and backend conditions.
 
 Nothing here edits server configuration or restarts the server. It only speaks
-REAPI. Blobs are deterministic in the master seed, so re-running the same seed
-re-uses the same digests (minimal new object-store churn).
+REAPI. Blobs depend on the master seed, run id, label, and size; retain all of those
+to reconstruct content.
 
-Two feedback loops ride on top of the pure-random generator, both reproducible
-under --seed:
+Two feedback loops extend the random generator. Their results depend on
+observed server responses and metrics as well as the seed:
 
   * FEEDBACK-GUIDED generation (--feedback, default on). After each iteration we
     scrape Prometheus /metrics, compute which metric families moved and bucket
@@ -28,7 +29,7 @@ under --seed:
   * RESOURCE-LEAK SOAK (--soak). Generalizes the scheduler rising-floor detector
     to EVERY scrapable numeric gauge (plus process RSS/FD when reachable). Over a
     long run it tracks each signal against a windowed baseline, normalizes for
-    offered load, and flags any signal whose floor grows without bound, emitting
+    offered load, and flags sustained rising-floor patterns as leak candidates, emitting
     the offending metric and its growth evidence as a finding.
 
     nix develop --command python3 scripts/chaos-monkey.py --host 127.0.0.1 --port 50052
@@ -399,7 +400,7 @@ class Monkey:
         self._store_rx = rx.compile(args.store_metric)
         self._active_rx = rx.compile(args.active_metric)
         # Feedback-guided generation: one novelty memory for the whole run, driven
-        # by a seeded RNG so a given --seed replays identically.
+        # by a seeded RNG; identical choices also require identical feedback history.
         self.feedback = Feedback(enabled=args.feedback, explore_floor=args.explore_floor)
         self._feedback_rng = random.Random(f"{self.seed}:feedback")
         self._prev_metrics = self._parse_metrics()   # baseline family values for deltas
