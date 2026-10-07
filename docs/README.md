@@ -1,8 +1,8 @@
 # rechaos reference docs
 
-This directory holds the reference-grade documentation for rechaos. Each page is
-derived from the actual source (the strict decoder, the pure core, and the chaos
-monkey) rather than from intent; nothing here is aspirational. For the project
+This directory holds the reference-grade documentation for rechaos. These pages describe the implemented interfaces, selected models, checks,
+and their limits. A documented model assumption is not a proof about a live
+server. For the project
 overview, install, and command reference, start at the top-level
 [README](../README.md).
 
@@ -16,3 +16,11 @@ overview, install, and command reference, start at the top-level
 | [`timeline-format.md`](timeline-format.md) | The on-disk decision-timeline and outcomes-sidecar JSONL schema, plus replay and verification semantics. |
 | [`cli-output.md`](cli-output.md) | The stdout verdict-JSON vocabulary emitted by each terminal subcommand (`validate`, `verify-replay`, `oracle`, `minimize`), their exit codes, and the stdout-JSON / stderr-chatter contract. |
 | [`../scripts/README.md`](../scripts/README.md) | Index of the operational scripts: build/test wrappers, protobuf tooling, the chaos monkey, the smoke/stress harnesses, and the standalone `repro-*.py` reproducers mapped to their invariants. |
+
+The executable guarantees are also exercised by `test/python_contracts.py` and
+`test/integration.py`, both run by the Nix `wire` check. They cover independent
+endpoint observations, incomplete verdicts, recorded graph reconstruction,
+consistency histories, CLI verdicts, and message faults. The reference pages for
+these surfaces are [differential testing](differential.md),
+[build traces](build-trace.md), [consistency](consistency-oracle.md), and the
+[selected Lean store model](reapi-spec.md).

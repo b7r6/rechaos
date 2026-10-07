@@ -13,11 +13,8 @@ frame level.
 
 ## How it works (and why raw sockets)
 
-The proxy prefers the `h2`/`hyperframe` libraries when importable, but under
-`nix develop` on this repo only `grpcio` is present -- `h2`, `hyperframe` and
-`hpack` are **not** installed. So the default, fully-supported path is a
-from-scratch, stdlib-only HTTP/2 framing layer (`socket`, `struct`, `selectors`,
-`threading`, `random`).
+The proxy uses a stdlib-only HTTP/2 framing layer (`socket`, `struct`,
+`threading`, `random`). It does not use `h2`, `hyperframe`, or an HPACK codec.
 
 Key design choice: we splice the connection at the **frame boundary** and
 forward each frame's bytes *verbatim* unless a rule mutates it. We deliberately
@@ -27,7 +24,7 @@ HEADERS/CONTINUATION frame would desync them), while still letting us:
 
 * fabricate brand-new frames: RST_STREAM, GOAWAY, PING, WINDOW_UPDATE, SETTINGS;
 * drop / delay whole frames: SETTINGS, WINDOW_UPDATE, PING;
-* fragment and reorder DATA frames (safe -- DATA carries no HPACK state);
+* fragment and reorder DATA frames without changing HPACK state;
 * rewrite SETTINGS values and GOAWAY last-stream-id / error code;
 * inject a *synthetic* trailers HEADERS frame using an HPACK literal field that
   needs zero dynamic-table state.
@@ -52,8 +49,8 @@ Selectable by `--direction {c2s,s2c,both}`, `--stream <id>`, `--probability
 | `delay-settings`          | connection liveness| Holds the peer's initial SETTINGS for `--delay-ms` before forwarding. Tests handshake-timeout handling. |
 | `ping-flood`              | connection liveness| Emits a burst (`--count`) of unsolicited PING frames. Trips server anti-abuse ("too many pings") / keepalive-enforcement logic. |
 | `ping-drop`               | connection liveness| Swallows PING frames so the peer's keepalive is never ACKed -> peer declares the connection dead. |
-| `data-fragment`           | flow-control / reassembly | Splits each DATA frame into `--fragment`-byte frames. Stresses message reassembly and per-frame flow-control accounting. |
-| `data-reorder`            | stream lifecycle   | Buffers DATA frames and flushes them reversed. A strictly-ordered reader should still reassemble correctly; a buggy one won't. |
+| `data-fragment`           | flow-control / reassembly | Removes optional padding and splits DATA into fragments of at most `--fragment` payload bytes, preserving application bytes and placing END_STREAM only on the last fragment. |
+| `data-reorder`            | stream lifecycle   | Buffers DATA separately for each stream and direction and reverses buffered frames before the stream's final DATA or trailers. This deliberately changes application bytes; the expected response is integrity rejection or an RPC error. Zero probability passes through unchanged. |
 | `trailer-inject`          | stream lifecycle   | Strips END_STREAM from the final DATA frame and appends a synthetic trailers HEADERS frame (`grpc-status: 2`). Tests trailer handling / status-from-trailers. |
 | `header-truncate`         | stream lifecycle   | Drops a HEADERS frame outright. **Note:** this desyncs HPACK on purpose -- use only to exercise hard failure handling, not for a recoverable run. |
 | `none`                    | --                 | Transparent pass-through (default). Use to confirm the proxy is correct. |

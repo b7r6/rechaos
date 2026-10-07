@@ -1,9 +1,9 @@
 # Local NativeLink chaos configs
 
-Three committed NativeLink configs for isolated, single-process local endpoints
-used in reproductions. Each listens on loopback only, stores under
-`/tmp/rechaos/...`, and touches no external service or cloud — nothing here reaches
-a shared cluster. The descriptions below are read directly from the config files;
+The three basic NativeLink configs below use loopback listeners and local
+filesystem stores under `/tmp/rechaos/...`. Two additional object-store rigs
+are described after the table; their proxy upstream determines whether traffic
+remains local or reaches a configured external object store. The descriptions below are read directly from the config files;
 see the [top-level README](../../README.md) and the
 [tutorial](../../docs/tutorial.md) for the end-to-end workflow.
 
@@ -23,6 +23,19 @@ see the [top-level README](../../README.md) and the
   reclaim path rather than the abandoned path.
 - `test-sched.json5` and `local-rbe-worker.json5` both bind the main server to
   `127.0.0.1:50090`; run only one of them at a time.
+
+## Object-store rigs
+
+- [`s3-deathspiral.json5`](s3-deathspiral.json5) uses ports 51055/51081/51090
+  for NativeLink, the S3 fault proxy, and local MinIO. It targets the
+  `experimental_cloud_object_store` AWS schema and enables background write-back.
+- [`r2-fault-proxy.json5`](r2-fault-proxy.json5) is a configurable template for
+  the `experimental_s3_store` schema. Its proxy may forward to local MinIO or an
+  external S3/R2 endpoint supplied by the operator. It requires bucket and
+  credential configuration; it is not a ready-to-run offline fixture.
+
+See [S3 faults](../../docs/s3-faults.md) and each config's schema/environment
+comments. Schema compatibility depends on the NativeLink build being tested.
 
 ## Launch a local endpoint
 
@@ -55,7 +68,7 @@ configs). The gateway's downstream listener defaults to `127.0.0.1:50070`:
 # In front of the scheduler endpoint, applying the example fault policy.
 ./result/bin/rechaos serve \
   --upstream-host 127.0.0.1 --upstream-port 50090 \
-  --port 50070 --policy ../fault-policy.json \
+  --port 50070 --policy examples/fault-policy.json \
   --record runs/chaos.jsonl
 ```
 

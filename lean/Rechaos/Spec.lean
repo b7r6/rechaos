@@ -5,14 +5,12 @@
 
   rechaos — a FORMAL REAPI specification in Lean.
 
-  This module is the moat: a machine-checked statement of what a correct
-  content-addressed Remote Execution API server MUST do, stated as a labelled
-  transition system (LTS) and a handful of correctness predicates, then PROVED to
-  satisfy the structural laws that a conforming CAS / Action Cache / ByteStream
-  server is obliged to uphold. The Python oracle `scripts/consistency_oracle.py`
-  checks these same properties at runtime against a live server; this file is its
-  formal backing. The mapping predicate ↔ REAPI method ↔ oracle check lives in
-  `docs/reapi-spec.md`.
+  This module defines a selected sequential store model and proves structural
+  laws about that model. It is not a complete REAPI specification or a proof
+  that a live server, the Haskell gateway, or the Python checker implements it.
+  The runtime history checker checks related properties independently; its
+  assumptions and the mapping to these laws are documented in
+  `docs/reapi-spec.md` and `docs/consistency-oracle.md`.
 
   Design discipline, matching the rest of `Rechaos.*`:
     * Abstract over the concrete hash and byte types — a `Store` is parameterised

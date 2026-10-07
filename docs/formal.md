@@ -19,10 +19,11 @@ opaque.
 
 ## What is formalized
 
-The Haskell production code (`Rechaos.Core.Scheduler`) and the Lean core share
-the same algebra. The Lean side is the authority on the *shape* of that algebra;
-the Haskell side is the executable implementation, pinned to the Lean definitions
-bit-for-bit by shared constants.
+The Haskell production code (`Rechaos.Core.Scheduler`) and Lean model implement
+the same intended algebra. Shared constants and finite conformance corpora check
+agreement on committed cases; they are not a proof of equivalence for all inputs.
+Structural Lean theorems apply to the Lean definitions. The IO shell, Python
+drivers, and live server scheduling are outside those proofs.
 
 ### Definition map: Haskell → Lean
 
@@ -584,9 +585,11 @@ by the kernel, and a `native_decide` conformance theorem against a corpus that
 `scripts/gen-conformance.hs` generates *by running the real Haskell reference*. The
 same reference-leads discipline runs end to end: the Haskell implementation is the
 authority, every corpus is generated from it, and both the Lean kernel and the
-Haskell `CoreSpec` golden-snapshot block re-verify it. The determinism contract —
-same policy + seed + trace ⇒ same decisions, recorded and replayed without drift —
-is now closed by a proof, not merely by sampling.
+Haskell `CoreSpec` golden-snapshot block re-verify it. The Lean structural laws are proved, while correspondence with Haskell is
+checked on finite corpora and sampled properties. Neither those checks nor
+shared constants prove end-to-end equivalence of the Haskell implementation,
+IO shell, and Lean models. `native_decide` corpus checks also trust Lean's native
+evaluation machinery. A fixed seed does not fix a live server's event trace.
 
 ## The no-sorry policy
 
@@ -595,18 +598,21 @@ The verified core admits no proof holes. Specifically:
 - **zero `sorry`** and **zero `admit`** — every theorem is closed by a real
   proof the kernel accepts.
 - **no new `axiom`** — the proofs rest only on core Lean (there is no Mathlib
-  dependency); nothing is assumed.
+  dependency). Corpus checks using `native_decide` have the trust boundary
+  described above; this policy forbids adding project-specific assumptions.
 - **no forced `UInt64` evaluation** — theorems are kept structural and abstract
   over the step function so the kernel never deep-recurses over 64-bit numerals.
 
 This can be checked mechanically:
 
 ```sh
-grep -rn 'sorry\|admit' lean/Rechaos    # expect no proof holes
+python3 scripts/check_lean.py lean    # rejects proof-hole tokens and new axioms
 ```
 
-(The literal string `sorry` appears once, inside a comment in `Core.lean` stating
-this very policy; there is no `sorry` *term* or *tactic*.)
+The guard ignores line comments, nested block comments, and string literals,
+so documentation mentions are allowed. It rejects `sorry`, `admit`, and `axiom`
+tokens in source code; `lake build` separately checks elaboration and proofs
+with `warningAsError=true`, so elaborator warnings about proof holes fail too.
 
 ## How to build
 
