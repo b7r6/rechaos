@@ -42,22 +42,22 @@ theorem iter_succ_right (f : UInt64 → UInt64) (n : Nat) (s : UInt64) :
     The event payloads are irrelevant to *how many* steps are consumed — exactly
     one per element — which is the property we verify below. Abstract over the
     event type `α` and the step `f`. -/
-def foldSteps (f : UInt64 → UInt64) : List α → UInt64 → UInt64
+def fold_steps (f : UInt64 → UInt64) : List α → UInt64 → UInt64
   | [], s => s
-  | _ :: xs, s => foldSteps f xs (f s)
+  | _ :: xs, s => fold_steps f xs (f s)
 
-@[simp] theorem foldSteps_nil (f : UInt64 → UInt64) (s : UInt64) :
-    foldSteps (α := α) f [] s = s := rfl
+@[simp] theorem fold_steps_nil (f : UInt64 → UInt64) (s : UInt64) :
+    fold_steps (α := α) f [] s = s := rfl
 
-@[simp] theorem foldSteps_cons (f : UInt64 → UInt64) (x : α) (xs : List α)
-    (s : UInt64) : foldSteps f (x :: xs) s = foldSteps f xs (f s) := rfl
+@[simp] theorem fold_steps_cons (f : UInt64 → UInt64) (x : α) (xs : List α)
+    (s : UInt64) : fold_steps f (x :: xs) s = fold_steps f xs (f s) := rfl
 
 /-- The key accounting lemma: folding the step across a list consumes *exactly*
     `xs.length` steps — i.e. it coincides with iterating `xs.length` times. The
     event payloads drop out entirely; only the length matters. Proved by
     induction on the list, with the step `f` abstract (no `UInt64` evaluation). -/
-theorem foldSteps_eq_iter (f : UInt64 → UInt64) (xs : List α) (s : UInt64) :
-    foldSteps f xs s = iter f xs.length s := by
+theorem fold_steps_eq_iter (f : UInt64 → UInt64) (xs : List α) (s : UInt64) :
+    fold_steps f xs s = iter f xs.length s := by
   induction xs generalizing s with
   | nil => simp
   | cons x xs ih => simp [ih]
@@ -65,21 +65,21 @@ theorem foldSteps_eq_iter (f : UInt64 → UInt64) (xs : List α) (s : UInt64) :
 /-- Specialised to the real keystream step: consuming a list of events advances
     the SplitMix64 state by exactly `xs.length`. This directly justifies the
     "one step per observed event" invariant of the scheduler. -/
-theorem foldSteps_advance (xs : List α) (s : UInt64) :
-    foldSteps (fun s => (nextSeed s).2) xs s = advance xs.length s :=
-  foldSteps_eq_iter _ xs s
+theorem fold_steps_advance (xs : List α) (s : UInt64) :
+    fold_steps (fun s => (next_seed s).2) xs s = advance xs.length s :=
+  fold_steps_eq_iter _ xs s
 
 /-- Determinism of the fold: equal start states give equal folded results,
     regardless of the (identical) event list. -/
-theorem foldSteps_deterministic (f : UInt64 → UInt64) (xs : List α)
-    (s t : UInt64) (h : s = t) : foldSteps f xs s = foldSteps f xs t := by
+theorem fold_steps_deterministic (f : UInt64 → UInt64) (xs : List α)
+    (s t : UInt64) (h : s = t) : fold_steps f xs s = fold_steps f xs t := by
   rw [h]
 
 /-- Concatenating event lists sums their step consumption: folding over `xs ++ ys`
     is folding over `ys` after folding over `xs`. The combination of this with
     `foldSteps_eq_iter` re-derives `iter_add`-style additivity at the list level. -/
-theorem foldSteps_append (f : UInt64 → UInt64) (xs ys : List α) (s : UInt64) :
-    foldSteps f (xs ++ ys) s = foldSteps f ys (foldSteps f xs s) := by
+theorem fold_steps_append (f : UInt64 → UInt64) (xs ys : List α) (s : UInt64) :
+    fold_steps f (xs ++ ys) s = fold_steps f ys (fold_steps f xs s) := by
   induction xs generalizing s with
   | nil => simp
   | cons x xs ih => simp [ih]

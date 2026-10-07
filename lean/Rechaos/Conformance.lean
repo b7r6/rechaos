@@ -13,7 +13,7 @@ namespace Rechaos
 set_option autoImplicit false
 
 /-- Reference-generated (seed, output, next-state) scope for SplitMix64. -/
-def splitmixScope : List (UInt64 × UInt64 × UInt64) :=
+def splitmix_scope : List (UInt64 × UInt64 × UInt64) :=
   [ (0x0000000000000000, 0xe220a8397b1dcdaf, 0x9e3779b97f4a7c15)
   , (0x0000000000000001, 0x910a2dec89025cc1, 0x9e3779b97f4a7c16)
   , (0x0000000000000002, 0x975835de1c9756ce, 0x9e3779b97f4a7c17)
@@ -36,8 +36,8 @@ def splitmixScope : List (UInt64 × UInt64 × UInt64) :=
 
 /-- `nextSeed` reproduces every reference vector in `splitmixScope`,
     checked by native evaluation (no kernel UInt64 reduction). -/
-theorem nextSeed_conforms_on_scope :
-    splitmixScope.all (fun entry => nextSeed entry.1 == entry.2) = true := by
+theorem next_seed_conforms_on_scope :
+    splitmix_scope.all (fun entry => next_seed entry.1 == entry.2) = true := by
   native_decide
 
 end Rechaos

@@ -11,7 +11,7 @@ namespace Rechaos
 
 /-- SplitMix64 one step: the exact UInt64 keystone of the scheduler. Returns the
     emitted value and the advanced state. Wraparound is definitional in UInt64. -/
-def nextSeed (s : UInt64) : UInt64 × UInt64 :=
+def next_seed (s : UInt64) : UInt64 × UInt64 :=
   let s' := s + 0x9e3779b97f4a7c15
   let z1 := (s' ^^^ (s' >>> 30)) * 0xbf58476d1ce4e5b9
   let z2 := (z1 ^^^ (z1 >>> 27)) * 0x94d049bb133111eb
@@ -39,7 +39,7 @@ theorem iter_add (f : UInt64 → UInt64) (m n : Nat) (s : UInt64) :
   | succ k ih => simp [Nat.succ_add, ih]
 
 /-- The scheduler keystream: advance the SplitMix64 state `n` times. -/
-def advance (n : Nat) (s : UInt64) : UInt64 := iter (fun s => (nextSeed s).2) n s
+def advance (n : Nat) (s : UInt64) : UInt64 := iter (fun s => (next_seed s).2) n s
 
 /-- Determinism of the keystream, as a corollary of `iter_add`. -/
 theorem advance_add (m n : Nat) (s : UInt64) :

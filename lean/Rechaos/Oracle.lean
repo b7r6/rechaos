@@ -27,7 +27,7 @@ set_option autoImplicit false
 /-- A single node in a build-output tree. Mirrors the Haskell `Entry`:
     `file contentHash sizeBytes executable`, a `symlink` carrying its target
     path, or a `directory`. -/
-inductive Entry
+inductive entry
   | /-- A regular file: content hash, size in bytes, and the executable bit. -/
     file (contentHash : String) (sizeBytes : Nat) (executable : Bool)
   | /-- A symlink carrying its target path. -/
@@ -40,20 +40,20 @@ inductive Entry
     Haskell reference uses a `Data.Map Text Entry`; a sorted association list is
     the core-Lean counterpart, and the key-ordered `diff` below matches the
     reference's ascending-key union exactly. -/
-abbrev Tree := List (String × Entry)
+abbrev tree := List (String × entry)
 
 /-- A per-path difference: `change path before after`, where `none` marks absence
     on that side (an addition or a deletion). Mirrors the Haskell `Change`. -/
-structure Change where
+structure change where
   path   : String
-  before : Option Entry
-  after  : Option Entry
+  before : Option entry
+  after  : Option entry
   deriving Repr, DecidableEq, Inhabited
 
 /-- The result of attempting a build. Mirrors the Haskell `BuildResult`. -/
-inductive BuildResult
+inductive build_result
   | /-- The build succeeded, producing this output `Tree`. -/
-    built (tree : Tree)
+    built (tree : tree)
   | /-- The build failed with the given message. -/
     buildFailed (message : String)
   | /-- The build did not finish within its deadline. -/
@@ -61,11 +61,11 @@ inductive BuildResult
   deriving Repr, Inhabited
 
 /-- The oracle's judgement on a pair of builds. Mirrors the Haskell `Verdict`. -/
-inductive Verdict
+inductive verdict
   | /-- The builds produced identical outputs. -/
     equivalent
   | /-- The builds diverged; carries the canonical list of `Change`s. -/
-    diverged (changes : List Change)
+    diverged (changes : List change)
   | /-- At least one build did not succeed, so no judgement is possible. -/
     inconclusive
   deriving Repr, DecidableEq, Inhabited
@@ -75,7 +75,7 @@ inductive Verdict
     merge over the union of both trees' keys — the Lean counterpart of the
     Haskell comprehension over `keysSet a ∪ keysSet b` in ascending order. An
     empty result means the trees are identical. -/
-def diff : Tree → Tree → List Change
+def diff : tree → tree → List change
   | [], [] => []
   | [], (keyB, entryB) :: restB =>
       { path := keyB, before := none, after := some entryB } :: diff [] restB
@@ -95,14 +95,14 @@ def diff : Tree → Tree → List Change
 
 /-- Whether two trees are equivalent, i.e. their `diff` is empty. Mirrors the
     Haskell `equivalent`. -/
-def equivalent (treeA treeB : Tree) : Bool :=
+def equivalent (treeA treeB : tree) : Bool :=
   diff treeA treeB == []
 
 /-- Compare two build outcomes. Both must have `built` successfully to be judged;
     equal outputs yield `equivalent`, differing outputs `diverged`, and any
     non-success on either side `inconclusive`. Mirrors the Haskell
     `compareBuilds`. -/
-def compareBuilds : BuildResult → BuildResult → Verdict
+def compare_builds : build_result → build_result → verdict
   | .built treeA, .built treeB =>
       match diff treeA treeB with
       | []      => .equivalent
@@ -114,7 +114,7 @@ def compareBuilds : BuildResult → BuildResult → Verdict
 /-- The empty-diff criterion: a diff is empty exactly when the trees are
     equivalent. Holds definitionally — `equivalent` is defined as the null-diff
     boolean test — so the two sides are the same fact. -/
-theorem diff_nil_iff_equivalent (treeA treeB : Tree) :
+theorem diff_nil_iff_equivalent (treeA treeB : tree) :
     diff treeA treeB = [] ↔ equivalent treeA treeB = true := by
   unfold equivalent
   constructor
@@ -126,7 +126,7 @@ theorem diff_nil_iff_equivalent (treeA treeB : Tree) :
 /-- `diff` of a tree against itself is empty, for any tree. By structural
     induction: matched heads carry equal entries and drop through to the tail,
     which is empty by the induction hypothesis. The engine of `equivalent_refl`. -/
-theorem diff_self_nil (tr : Tree) : diff tr tr = [] := by
+theorem diff_self_nil (tr : tree) : diff tr tr = [] := by
   induction tr with
   | nil => simp [diff]
   | cons head rest ih =>
@@ -134,7 +134,7 @@ theorem diff_self_nil (tr : Tree) : diff tr tr = [] := by
       simp [diff, ih]
 
 /-- `equivalent` is reflexive: every tree is equivalent to itself. -/
-theorem equivalent_refl (tr : Tree) : equivalent tr tr = true := by
+theorem equivalent_refl (tr : tree) : equivalent tr tr = true := by
   unfold equivalent
   rw [diff_self_nil]
   rfl
@@ -147,7 +147,7 @@ theorem equivalent_refl (tr : Tree) : equivalent tr tr = true := by
     a leading `Change`, so a null result rules those branches out. The structural
     crux of both symmetry and transitivity — and it needs no ordering lemmas, only
     that the two unequal-key branches each produce a cons. -/
-theorem diff_nil_imp_eq : ∀ (treeA treeB : Tree), diff treeA treeB = [] → treeA = treeB := by
+theorem diff_nil_imp_eq : ∀ (treeA treeB : tree), diff treeA treeB = [] → treeA = treeB := by
   intro treeA
   induction treeA with
   | nil =>
@@ -183,7 +183,7 @@ theorem diff_nil_imp_eq : ∀ (treeA treeB : Tree), diff treeA treeB = [] → tr
     pins both trees to the same list (`diff_nil_imp_eq`), and a tree never differs
     from itself (`diff_self_nil`), so a null diff one way is a null diff the other.
     Needs no key-ordering antisymmetry — it routes entirely through list equality. -/
-theorem equivalent_symm (treeA treeB : Tree) :
+theorem equivalent_symm (treeA treeB : tree) :
     equivalent treeA treeB = equivalent treeB treeA := by
   unfold equivalent
   by_cases h : diff treeA treeB = []
@@ -201,7 +201,7 @@ theorem equivalent_symm (treeA treeB : Tree) :
     into an empty diff. No sortedness hypothesis is needed because a null diff
     already forces the two argument lists to coincide. -/
 theorem equivalent_trans
-    (treeA treeB treeC : Tree)
+    (treeA treeB treeC : tree)
     (hab : equivalent treeA treeB = true)
     (hbc : equivalent treeB treeC = true) :
     equivalent treeA treeC = true := by
