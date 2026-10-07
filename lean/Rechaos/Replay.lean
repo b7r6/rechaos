@@ -63,22 +63,22 @@ def tableMember (key : EventKey) : EventTable → Bool
     most one in a validated table). The counterpart of `M.lookup`. -/
 def tableLookup (key : EventKey) : EventTable → Option Decision
   | [] => none
-  | (k, decision) :: rest => if k == key then some decision else tableLookup key rest
+  | (k, dec) :: rest => if k == key then some dec else tableLookup key rest
 
 /-- Index a timeline by `EventKey`, failing (`none`) if any event identity
     repeats. A well-formed timeline has at most one decision per event. The
     duplicate guard (`tableMember`) mirrors the reference `Data.Map`-insert check;
     the resulting association order is unspecified, as for a `Data.Map`. Faithful to
     the Haskell `validateTimeline`. -/
-def validateTimeline (timeline : Timeline) : Option EventTable :=
-  go [] timeline
+def validateTimeline (tl : Timeline) : Option EventTable :=
+  go [] tl
 where
   go (acc : EventTable) : Timeline → Option EventTable
     | [] => some acc
-    | decision :: rest =>
-        let key := eventKey decision.event
+    | dec :: rest =>
+        let key := eventKey dec.event
         if tableMember key acc then none
-        else go ((key, decision) :: acc) rest
+        else go ((key, dec) :: acc) rest
 
 /-- Look up the decision for a live event against a recorded timeline table. The
     `sparse` flag selects the semantics: a full recording (`false`) fails closed
@@ -121,8 +121,8 @@ def verifyReplay (expected observed : Timeline) : Bool :=
 -- ── structural facts about the table ─────────────────────────────────────────
 
 /-- `tableLookup` finds a key just inserted at the head of a table. -/
-theorem tableLookup_cons_self (key : EventKey) (decision : Decision) (rest : EventTable) :
-    tableLookup key ((key, decision) :: rest) = some decision := by
+theorem tableLookup_cons_self (key : EventKey) (dec : Decision) (rest : EventTable) :
+    tableLookup key ((key, dec) :: rest) = some dec := by
   simp [tableLookup]
 
 /-- `replayDecision` on an empty table passes a sparse event through and fails a
@@ -162,7 +162,7 @@ theorem tableMember_false_iff (key : EventKey) (table : EventTable) :
   induction table with
   | nil => simp [tableMember]
   | cons head rest ih =>
-      obtain ⟨k, decision⟩ := head
+      obtain ⟨k, dec⟩ := head
       simp only [tableMember, List.map_cons, List.mem_cons]
       by_cases hk : k = key
       · subst hk; simp
@@ -188,7 +188,7 @@ theorem lookup_of_mem_nodup :
   | nil => intro _ binding hbind; cases hbind
   | cons head rest ih =>
       intro hnodup binding hbind
-      obtain ⟨k, decision⟩ := head
+      obtain ⟨k, dec⟩ := head
       simp only [List.map_cons, List.nodup_cons] at hnodup
       obtain ⟨hnotin, hrest⟩ := hnodup
       rw [List.mem_cons] at hbind
@@ -216,14 +216,14 @@ theorem go_nodup :
       intro acc table hacc hgo
       simp only [validateTimeline.go, Option.some.injEq] at hgo
       subst hgo; exact hacc
-  | cons decision rest ih =>
+  | cons dec rest ih =>
       intro acc table hacc hgo
       simp only [validateTimeline.go] at hgo
-      by_cases hmem : tableMember (eventKey decision.event) acc = true
+      by_cases hmem : tableMember (eventKey dec.event) acc = true
       · simp [hmem] at hgo
-      · have hmemf : tableMember (eventKey decision.event) acc = false := by simpa using hmem
+      · have hmemf : tableMember (eventKey dec.event) acc = false := by simpa using hmem
         rw [if_neg (by simp [hmemf])] at hgo
-        apply ih ((eventKey decision.event, decision) :: acc) table _ hgo
+        apply ih ((eventKey dec.event, dec) :: acc) table _ hgo
         simp only [List.map_cons, List.nodup_cons]
         exact ⟨(tableMember_false_iff _ _).mp hmemf, hacc⟩
 
@@ -241,12 +241,12 @@ theorem go_key_agree :
       intro acc table hacc hgo
       simp only [validateTimeline.go, Option.some.injEq] at hgo
       subst hgo; exact hacc
-  | cons decision rest ih =>
+  | cons dec rest ih =>
       intro acc table hacc hgo
       simp only [validateTimeline.go] at hgo
-      by_cases hmem : tableMember (eventKey decision.event) acc = true
+      by_cases hmem : tableMember (eventKey dec.event) acc = true
       · simp [hmem] at hgo
-      · have hmemf : tableMember (eventKey decision.event) acc = false := by simpa using hmem
+      · have hmemf : tableMember (eventKey dec.event) acc = false := by simpa using hmem
         rw [if_neg (by simp [hmemf])] at hgo
         apply ih _ table _ hgo
         intro binding hbind
@@ -256,26 +256,26 @@ theorem go_key_agree :
         · exact hacc binding hmem'
 
 /-- A validated table has distinct keys. The top-level corollary of `go_nodup`. -/
-theorem validateTimeline_nodup (timeline : Timeline) (table : EventTable)
-    (hval : validateTimeline timeline = some table) : (table.map (·.1)).Nodup :=
-  go_nodup timeline [] table (by simp) hval
+theorem validateTimeline_nodup (tl : Timeline) (table : EventTable)
+    (hval : validateTimeline tl = some table) : (table.map (·.1)).Nodup :=
+  go_nodup tl [] table (by simp) hval
 
 /-- Every binding of a validated table is keyed by its own event's `eventKey`. The
     top-level corollary of `go_key_agree`. -/
-theorem validateTimeline_key_agree (timeline : Timeline) (table : EventTable)
-    (hval : validateTimeline timeline = some table) :
+theorem validateTimeline_key_agree (tl : Timeline) (table : EventTable)
+    (hval : validateTimeline tl = some table) :
     ∀ binding ∈ table, binding.1 = eventKey binding.2.event :=
-  go_key_agree timeline [] table (by simp) hval
+  go_key_agree tl [] table (by simp) hval
 
 /-- Each binding of a validated table matches itself under `observedMatches`: the
     key is found, the fingerprint agrees (reflexively), and the injection is
     identical. The per-binding core of self-coverage. -/
-theorem observedMatches_self (timeline : Timeline) (table : EventTable)
-    (hval : validateTimeline timeline = some table)
+theorem observedMatches_self (tl : Timeline) (table : EventTable)
+    (hval : validateTimeline tl = some table)
     (binding : EventKey × Decision) (hbind : binding ∈ table) :
     observedMatches table binding.2 = true := by
-  have hnodup := validateTimeline_nodup timeline table hval
-  have hagree := validateTimeline_key_agree timeline table hval binding hbind
+  have hnodup := validateTimeline_nodup tl table hval
+  have hagree := validateTimeline_key_agree tl table hval binding hbind
   have hlook : tableLookup binding.1 table = some binding.2 :=
     lookup_of_mem_nodup table hnodup binding hbind
   unfold observedMatches
@@ -305,13 +305,13 @@ theorem all_false_of_mem_false {α : Type} (elems : List α) (pred : α → Bool
     recording returns the recording. Proved from the validated-table invariants
     (distinct keys ⇒ self-lookup) and `sameEvent` reflexivity. -/
 theorem replayDecision_recorded_identity
-    (sparse : Bool) (timeline : Timeline) (table : EventTable)
-    (hval : validateTimeline timeline = some table)
+    (sparse : Bool) (tl : Timeline) (table : EventTable)
+    (hval : validateTimeline tl = some table)
     (binding : EventKey × Decision) (hbind : binding ∈ table) :
     replayDecision sparse table binding.2.event
       = .decided { event := binding.2.event, injection := binding.2.injection } := by
-  have hnodup := validateTimeline_nodup timeline table hval
-  have hagree := validateTimeline_key_agree timeline table hval binding hbind
+  have hnodup := validateTimeline_nodup tl table hval
+  have hagree := validateTimeline_key_agree tl table hval binding hbind
   have hlook : tableLookup binding.1 table = some binding.2 :=
     lookup_of_mem_nodup table hnodup binding hbind
   apply replayDecision_reuses_recorded_injection
@@ -322,15 +322,15 @@ theorem replayDecision_recorded_identity
     itself. Replaying a recording against the very events it recorded always
     succeeds — every recorded event is observed, unchanged, with its recorded
     injection. The headline round-trip of the replay layer. -/
-theorem verifyReplay_identity (timeline : Timeline) (table : EventTable)
-    (hval : validateTimeline timeline = some table) :
-    verifyReplay timeline timeline = true := by
+theorem verifyReplay_identity (tl : Timeline) (table : EventTable)
+    (hval : validateTimeline tl = some table) :
+    verifyReplay tl tl = true := by
   unfold verifyReplay
   rw [hval]
   simp only
   rw [List.all_eq_true]
   intro binding hbind
-  exact observedMatches_self timeline table hval binding hbind
+  exact observedMatches_self tl table hval binding hbind
 
 /-- REPLAY IDENTITY specialized to the scheduler: when the timeline produced by
     `schedule policy events` validates (its events carry distinct identities),
@@ -338,10 +338,10 @@ theorem verifyReplay_identity (timeline : Timeline) (table : EventTable)
     round-trip that closes the determinism contract — the decisions `schedule`
     emits are precisely the decisions a replay of them recovers. -/
 theorem verifyReplay_schedule_identity
-    (policy : Policy) (events : List Event) (table : EventTable)
-    (hval : validateTimeline (schedule policy events) = some table) :
-    verifyReplay (schedule policy events) (schedule policy events) = true :=
-  verifyReplay_identity (schedule policy events) table hval
+    (pol : Policy) (events : List Event) (table : EventTable)
+    (hval : validateTimeline (schedule pol events) = some table) :
+    verifyReplay (schedule pol events) (schedule pol events) = true :=
+  verifyReplay_identity (schedule pol events) table hval
 
 /-- COVERAGE: a recorded event that never arrived rejects the replay. If a binding
     of the validated expected table has no counterpart in the observed table

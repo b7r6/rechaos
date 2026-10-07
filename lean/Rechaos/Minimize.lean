@@ -105,31 +105,31 @@ def nubTimelines : List Timeline → List Timeline
     intensity candidates follow a finite, decreasing measure (see `weaker`), and
     timing stays explicit in the retained event identity and `delay` value.
     Mirrors the Haskell `candidates`. -/
-def candidates (timeline : Timeline) : List Timeline :=
-  let len := timeline.length
+def candidates (tl : Timeline) : List Timeline :=
+  let len := tl.length
   let sizes := descending len len
   let deletions :=
     sizes.flatMap (fun chunk =>
       (strideOffsets (len + 1) chunk 0 len).map (fun offset =>
-        timeline.take offset ++ timeline.drop (offset + chunk)))
+        tl.take offset ++ tl.drop (offset + chunk)))
   let intensities :=
-    timeline.zipIdx.flatMap (fun pair =>
-      let decision := pair.1
+    tl.zipIdx.flatMap (fun pair =>
+      let dec := pair.1
       let offset := pair.2
-      match decision.injection with
+      match dec.injection with
       | none => []
       | some old =>
-          (weaker decision.event old).map (fun replacement =>
-            timeline.take offset
-              ++ [{ decision with injection := some replacement }]
-              ++ timeline.drop (offset + 1)))
+          (weaker dec.event old).map (fun replacement =>
+            tl.take offset
+              ++ [{ dec with injection := some replacement }]
+              ++ tl.drop (offset + 1)))
   nubTimelines (deletions ++ intensities)
 
 /-- Seed the state machine from a failing timeline. Keeps only its injected
     faults as the initial `best` and enqueues their `candidates`. Mirrors the
     Haskell `start`. -/
-def start (timeline : Timeline) : ShrinkState :=
-  let faults := timeline.filter (fun decision => decision.injection.isSome)
+def start (tl : Timeline) : ShrinkState :=
+  let faults := tl.filter (fun dec => dec.injection.isSome)
   { best := faults, pending := candidates faults }
 
 /-- The next candidate timeline to test, or `none` when the queue is empty and
@@ -144,11 +144,11 @@ def candidate : ShrinkState → Option Timeline
     `doesNotTrigger` or `unknown` the candidate is discarded and the next one is
     tried. Conservative: an `unknown` never advances `best`. Mirrors the Haskell
     `observe`. -/
-def observe (verdict : MinimizeVerdict) (state : ShrinkState) : ShrinkState :=
+def observe (vdt : MinimizeVerdict) (state : ShrinkState) : ShrinkState :=
   match state.pending with
   | [] => state
   | next :: rest =>
-      match verdict with
+      match vdt with
       | .triggers => { best := next, pending := candidates next }
       | _ => { best := state.best, pending := rest }
 
@@ -173,17 +173,17 @@ def severity (anchor : Event) : Fault → Nat
     component of the well-founded shrink measure. -/
 def summedIntensity : Timeline → Nat
   | [] => 0
-  | decision :: rest =>
-      (match decision.injection with
+  | dec :: rest =>
+      (match dec.injection with
        | none => 0
-       | some fault => severity decision.event fault)
+       | some flt => severity dec.event flt)
       + summedIntensity rest
 
 /-- The well-founded shrink measure: `(length, summed-intensity)`, ordered
     lexicographically. Every generated candidate is strictly smaller under it, so
     the shrink loop terminates. -/
-def measure (timeline : Timeline) : Nat × Nat :=
-  (timeline.length, summedIntensity timeline)
+def measure (tl : Timeline) : Nat × Nat :=
+  (tl.length, summedIntensity tl)
 
 /-- Lexicographic strictly-less on the `(length, summed-intensity)` measure:
     shorter wins outright; on a length tie, lower summed intensity wins. -/
@@ -208,7 +208,7 @@ theorem weaker_severity_lt
         simp only [severity]
         omega
       · simp only [hpos, if_false, List.not_mem_nil] at hmem
-  | abort status =>
+  | abort stat =>
       simp only [weaker, List.not_mem_nil] at hmem
   | truncate keep =>
       simp only [weaker] at hmem
@@ -280,11 +280,11 @@ theorem summedIntensity_append (left right : Timeline) :
       omega
 
 /-- `summedIntensity` of a singleton is the severity of its (optional) injection. -/
-theorem summedIntensity_singleton (decision : Decision) :
-    summedIntensity [decision]
-      = (match decision.injection with
+theorem summedIntensity_singleton (dec : Decision) :
+    summedIntensity [dec]
+      = (match dec.injection with
          | none => 0
-         | some fault => severity decision.event fault) := by
+         | some flt => severity dec.event flt) := by
   simp [summedIntensity]
 
 /-- Deleting a nonempty contiguous chunk strictly shrinks the length, hence the
@@ -292,9 +292,9 @@ theorem summedIntensity_singleton (decision : Decision) :
     with `chunk ≥ 1`; their length is `len - chunk < len` whenever the offset lies
     within the timeline. (Stated for the shape the generator produces.) -/
 theorem deletion_length_lt
-    (timeline : Timeline) (offset chunk : Nat)
-    (hchunk : chunk ≥ 1) (hoffset : offset < timeline.length) :
-    (timeline.take offset ++ timeline.drop (offset + chunk)).length < timeline.length := by
+    (tl : Timeline) (offset chunk : Nat)
+    (hchunk : chunk ≥ 1) (hoffset : offset < tl.length) :
+    (tl.take offset ++ tl.drop (offset + chunk)).length < tl.length := by
   rw [List.length_append, List.length_take, List.length_drop]
   omega
 
@@ -306,15 +306,15 @@ theorem deletion_length_lt
     the external checker reported `triggers` on. Given a truthful checker, every
     accepted `best` is therefore a confirmed reproduction. -/
 theorem observe_best_triggers
-    (verdict : MinimizeVerdict) (state : ShrinkState)
-    (hchanged : (observe verdict state).best ≠ state.best) :
-    verdict = .triggers
-      ∧ ∃ next rest, state.pending = next :: rest ∧ (observe verdict state).best = next := by
+    (vdt : MinimizeVerdict) (state : ShrinkState)
+    (hchanged : (observe vdt state).best ≠ state.best) :
+    vdt = .triggers
+      ∧ ∃ next rest, state.pending = next :: rest ∧ (observe vdt state).best = next := by
   obtain ⟨sbest, spending⟩ := state
   cases spending with
   | nil => simp [observe] at hchanged
   | cons next rest =>
-      cases verdict with
+      cases vdt with
       | triggers => exact ⟨rfl, next, rest, rfl, rfl⟩
       | doesNotTrigger => simp [observe] at hchanged
       | unknown => simp [observe] at hchanged

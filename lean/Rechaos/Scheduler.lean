@@ -58,9 +58,9 @@ def fires (chancePpm : Nat) (draw : UInt64) : Bool :=
 def choose (rules : List Rule) (draw : UInt64) (evt : Event) : Option Fault :=
   match rules with
   | [] => none
-  | rule :: rest =>
-      if matchesTarget rule.target evt then
-        if fires rule.chancePpm draw then some rule.fault else none
+  | rul :: rest =>
+      if matchesTarget rul.target evt then
+        if fires rul.chancePpm draw then some rul.fault else none
       else
         choose rest draw evt
 
@@ -80,15 +80,15 @@ def step (rules : List Rule) (state : UInt64) (evt : Event) : UInt64 × Decision
 def scheduleFrom (rules : List Rule) : UInt64 → List Event → UInt64 × Timeline
   | state, [] => (state, [])
   | state, evt :: rest =>
-      let (state', decision) := step rules state evt
-      let (stateFinal, timeline) := scheduleFrom rules state' rest
-      (stateFinal, decision :: timeline)
+      let (state', dec) := step rules state evt
+      let (stateFinal, tl) := scheduleFrom rules state' rest
+      (stateFinal, dec :: tl)
 
 /-- Run the scheduler over a whole event trace, threading the seed from the
     policy's initial `seed`. Same policy + seed + trace always produce the same
     `Timeline`. Faithful to the Haskell `schedule`. -/
-def schedule (policy : Policy) (events : List Event) : Timeline :=
-  (scheduleFrom policy.rules policy.seed events).2
+def schedule (pol : Policy) (events : List Event) : Timeline :=
+  (scheduleFrom pol.rules pol.seed events).2
 
 -- ── probability-gate lemmas (abstract over the draw) ────────────────────────
 
@@ -115,9 +115,9 @@ theorem choose_nil (draw : UInt64) (evt : Event) : choose [] draw evt = none := 
     nonmatching rule were absent. This is the "only matching rules participate"
     half of first-match. -/
 theorem choose_skips_nonmatching
-    (rule : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
-    (hmiss : matchesTarget rule.target evt = false) :
-    choose (rule :: rest) draw evt = choose rest draw evt := by
+    (rul : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
+    (hmiss : matchesTarget rul.target evt = false) :
+    choose (rul :: rest) draw evt = choose rest draw evt := by
   simp [choose, hmiss]
 
 /-- SELECTION, ownership: the FIRST matching rule owns the event. When the
@@ -125,10 +125,10 @@ theorem choose_skips_nonmatching
     gate — the remaining rules are never consulted. Injects that rule's fault iff
     its gate fires. This is the core first-match semantics. -/
 theorem choose_first_match
-    (rule : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
-    (hhit : matchesTarget rule.target evt = true) :
-    choose (rule :: rest) draw evt =
-      (if fires rule.chancePpm draw then some rule.fault else none) := by
+    (rul : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
+    (hhit : matchesTarget rul.target evt = true) :
+    choose (rul :: rest) draw evt =
+      (if fires rul.chancePpm draw then some rul.fault else none) := by
   simp [choose, hhit]
 
 /-- SELECTION corollary: once the first matching rule is found, no later rule can
@@ -136,32 +136,32 @@ theorem choose_first_match
     tail `rest` — swapping the tail leaves the decision unchanged. This rules out
     accidental fallthrough to a lower-priority rule. -/
 theorem choose_head_owns_independent_of_tail
-    (rule : Rule) (rest other : List Rule) (draw : UInt64) (evt : Event)
-    (hhit : matchesTarget rule.target evt = true) :
-    choose (rule :: rest) draw evt = choose (rule :: other) draw evt := by
-  rw [choose_first_match rule rest draw evt hhit,
-      choose_first_match rule other draw evt hhit]
+    (rul : Rule) (rest other : List Rule) (draw : UInt64) (evt : Event)
+    (hhit : matchesTarget rul.target evt = true) :
+    choose (rul :: rest) draw evt = choose (rul :: other) draw evt := by
+  rw [choose_first_match rul rest draw evt hhit,
+      choose_first_match rul other draw evt hhit]
 
 /-- SELECTION, first-match pins to the firing gate: if the head matches AND its
     gate fires, `choose` injects exactly that head rule's fault, independent of
     everything downstream. The sharpest ownership statement. -/
 theorem choose_first_match_fires
-    (rule : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
-    (hhit : matchesTarget rule.target evt = true)
-    (hfire : fires rule.chancePpm draw = true) :
-    choose (rule :: rest) draw evt = some rule.fault := by
-  rw [choose_first_match rule rest draw evt hhit, if_pos hfire]
+    (rul : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
+    (hhit : matchesTarget rul.target evt = true)
+    (hfire : fires rul.chancePpm draw = true) :
+    choose (rul :: rest) draw evt = some rul.fault := by
+  rw [choose_first_match rul rest draw evt hhit, if_pos hfire]
 
 /-- SELECTION, a matching-but-shut head still owns (as a pass-through): if the head
     matchesTarget but its gate does NOT fire, `choose` is `none` — the event is NOT
     offered to the tail. First-match ownership includes the decision to pass
     through. -/
 theorem choose_first_match_shut
-    (rule : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
-    (hhit : matchesTarget rule.target evt = true)
-    (hshut : fires rule.chancePpm draw = false) :
-    choose (rule :: rest) draw evt = none := by
-  rw [choose_first_match rule rest draw evt hhit, if_neg (by simp [hshut])]
+    (rul : Rule) (rest : List Rule) (draw : UInt64) (evt : Event)
+    (hhit : matchesTarget rul.target evt = true)
+    (hshut : fires rul.chancePpm draw = false) :
+    choose (rul :: rest) draw evt = none := by
+  rw [choose_first_match rul rest draw evt hhit, if_neg (by simp [hshut])]
 
 -- ── step / schedule structural facts ────────────────────────────────────────
 
@@ -187,7 +187,7 @@ theorem step_nil_passthrough (state : UInt64) (evt : Event) :
     (step [] state evt).2.injection = none := rfl
 
 /-- `schedule` over an empty trace is the empty timeline. No event, no decision. -/
-theorem schedule_nil (policy : Policy) : schedule policy [] = [] := rfl
+theorem schedule_nil (pol : Policy) : schedule pol [] = [] := rfl
 
 /-- The timeline has exactly one decision per event: `scheduleFrom` preserves the
     trace length. Proved by induction on the trace, abstract over the seed. -/
@@ -203,9 +203,9 @@ theorem scheduleFrom_length (rules : List Rule) :
 
 /-- `schedule` emits exactly one decision per observed event. A corollary of
     `scheduleFrom_length`. -/
-theorem schedule_length (policy : Policy) (events : List Event) :
-    (schedule policy events).length = events.length :=
-  scheduleFrom_length policy.rules policy.seed events
+theorem schedule_length (pol : Policy) (events : List Event) :
+    (schedule pol events).length = events.length :=
+  scheduleFrom_length pol.rules pol.seed events
 
 /-- Each decision in a `scheduleFrom` run is made for the event at the same
     position: the decisions' events are exactly the input trace. Proved by
@@ -222,8 +222,8 @@ theorem scheduleFrom_events (rules : List Rule) :
 
 /-- `schedule` decides on exactly the input events, in order. A corollary of
     `scheduleFrom_events`. -/
-theorem schedule_events (policy : Policy) (events : List Event) :
-    (schedule policy events).map (·.event) = events :=
-  scheduleFrom_events policy.rules policy.seed events
+theorem schedule_events (pol : Policy) (events : List Event) :
+    (schedule pol events).map (·.event) = events :=
+  scheduleFrom_events pol.rules pol.seed events
 
 end Rechaos

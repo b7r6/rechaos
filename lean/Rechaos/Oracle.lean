@@ -126,15 +126,15 @@ theorem diff_nil_iff_equivalent (treeA treeB : Tree) :
 /-- `diff` of a tree against itself is empty, for any tree. By structural
     induction: matched heads carry equal entries and drop through to the tail,
     which is empty by the induction hypothesis. The engine of `equivalent_refl`. -/
-theorem diff_self_nil (tree : Tree) : diff tree tree = [] := by
-  induction tree with
+theorem diff_self_nil (tr : Tree) : diff tr tr = [] := by
+  induction tr with
   | nil => simp [diff]
   | cons head rest ih =>
-      obtain ⟨key, entry⟩ := head
+      obtain ⟨key, ent⟩ := head
       simp [diff, ih]
 
 /-- `equivalent` is reflexive: every tree is equivalent to itself. -/
-theorem equivalent_refl (tree : Tree) : equivalent tree tree = true := by
+theorem equivalent_refl (tr : Tree) : equivalent tr tr = true := by
   unfold equivalent
   rw [diff_self_nil]
   rfl
