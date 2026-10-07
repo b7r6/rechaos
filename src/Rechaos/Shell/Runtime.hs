@@ -80,6 +80,8 @@ the monotonic start time the call's events will be measured against.
 beginCall :: Runtime -> Text -> IO (Natural, Word64)
 beginCall (Runtime _ _ state _ _) method = do
   n <- modifyMVar state $ \(RuntimeState s calls seen) -> do
+    -- n.b. occurrence is 1-based: the first call to a method gets 1, not 0, so
+    -- the index the core sees in an 'Event' matches the policy's 1-based rules.
     let n = M.findWithDefault 0 method calls + 1
     pure (RuntimeState s (M.insert method n calls) seen, n)
   now <- getMonotonicTimeNSec
@@ -112,9 +114,9 @@ decide (Runtime p replay state journal _) method occurrence started direction in
           (sha256 bytes)
   modifyMVar state $ \old@(RuntimeState s calls seen) -> do
     let (s', d) = step (rules p) s e
-        chosen = case replay of
-          Nothing -> Right d
-          Just (sparse, table) -> replayDecision sparse table e
+        chosen = maybe (Right d) (\(sparse, table) -> replayDecision sparse table e) replay
+    -- CASE-OK: two asymmetric effectful arms on a local Either; the Right arm
+    -- journals and returns, so an `either` eliminator would not read clearer.
     case chosen of
       Left err -> pure (old, Left (err <> ": " <> T.pack (show (eventKey e))))
       Right decision -> do
@@ -146,7 +148,7 @@ replaying or when every scheduled event was seen.
 -}
 remainingReplay :: Runtime -> IO [EventKey]
 remainingReplay (Runtime _ replay state _ _) = withMVar state $ \(RuntimeState _ _ seen) ->
-  pure (case replay of Nothing -> []; Just (_, table) -> S.toList (M.keysSet table S.\\ seen))
+  pure (maybe [] (\(_, table) -> S.toList (M.keysSet table S.\\ seen)) replay)
 
 {- | Sleep for the given number of microseconds in bounded chunks, avoiding 'Int'
 overflow and staying interruptible even for very long delays.

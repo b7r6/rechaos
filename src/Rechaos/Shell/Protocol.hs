@@ -95,10 +95,15 @@ timeline records and that replay checking compares.
 sha256 :: L.ByteString -> Text
 sha256 = T.pack . show . (hashlazy :: L.ByteString -> Digest SHA256)
 
+-- n.b. REAPI resource names end @.../{blobs|compressed-blobs}/{hash}/{size}@;
+-- we read the trailing @size@ only when a @blobs@ segment is present, so an
+-- unrelated resource shape never yields a spurious size.
 resourceSize :: Text -> Maybe Natural
-resourceSize resource = case reverse (T.splitOn "/" resource) of
-  size : _hash : rest | "blobs" `elem` rest || "compressed-blobs" `elem` rest -> readMaybe (T.unpack size)
-  _ -> Nothing
+resourceSize resource
+  | size : _hash : rest <- reverse (T.splitOn "/" resource)
+  , "blobs" `elem` rest || "compressed-blobs" `elem` rest =
+      readMaybe (T.unpack size)
+  | otherwise = Nothing
 
 {- | The total content size in bytes that a message refers to, decoded from the
 payload for the given method, or 'Nothing' when the method is not understood

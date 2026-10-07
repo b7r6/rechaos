@@ -37,14 +37,15 @@ instance ToJSON Direction where
   toJSON Request = String "request"
   toJSON Response = String "response"
 instance FromJSON Direction where
-  parseJSON = withText "direction" $ \x -> case x of
-    "request" -> pure Request
-    "response" -> pure Response
-    _ -> fail "direction must be request or response"
+  parseJSON = withText "direction" parse
+   where
+    parse "request" = pure Request
+    parse "response" = pure Response
+    parse _ = fail "direction must be request or response"
 instance ToJSON Status where toJSON = String . T.pack . show
 instance FromJSON Status where
   parseJSON = withText "status" $ \x ->
-    case filter ((== x) . T.pack . show) [minBound .. maxBound] of
+    case filter ((== x) . T.pack . show) [minBound .. maxBound] of -- CASE-OK: unique-match on a mid-expression filtered list
       [s] -> pure s
       _ -> fail "unsupported gRPC error status"
 instance ToJSON Fault where
@@ -56,19 +57,21 @@ instance ToJSON Fault where
 instance FromJSON Fault where
   parseJSON = withObject "fault" $ \o -> do
     kind <- o .: "kind" :: Parser Text
-    case kind of
-      "delay" -> onlyKeys ["kind", "micros"] o >> Delay <$> o .: "micros"
-      "abort" -> onlyKeys ["kind", "status"] o >> Abort <$> o .: "status"
-      "dribble" -> do
-        onlyKeys ["kind", "bytesPerSecond", "chunkBytes"] o
-        r <- o .: "bytesPerSecond"
-        c <- o .: "chunkBytes"
-        unless (validFaultBounds (Dribble r c)) $
-          fail "dribble requires positive rate and chunkBytes in 1..4194304"
-        pure (Dribble r c)
-      "truncate" -> onlyKeys ["kind", "keepBytes"] o >> Truncate <$> o .: "keepBytes"
-      "corrupt" -> onlyKeys ["kind", "bytes"] o >> Corrupt <$> o .: "bytes"
-      _ -> fail "unknown fault kind"
+    let byKind "delay" = onlyKeys ["kind", "micros"] o >> Delay <$> o .: "micros"
+        byKind "abort" = onlyKeys ["kind", "status"] o >> Abort <$> o .: "status"
+        byKind "dribble" = do
+          onlyKeys ["kind", "bytesPerSecond", "chunkBytes"] o
+          r <- o .: "bytesPerSecond"
+          c <- o .: "chunkBytes"
+          -- n.b. bounds checked here, not in 'mkRule': a Dribble can also land
+          -- on a decision/timeline value that never passes through a rule.
+          unless (validFaultBounds (Dribble r c)) $
+            fail "dribble requires positive rate and chunkBytes in 1..4194304"
+          pure (Dribble r c)
+        byKind "truncate" = onlyKeys ["kind", "keepBytes"] o >> Truncate <$> o .: "keepBytes"
+        byKind "corrupt" = onlyKeys ["kind", "bytes"] o >> Corrupt <$> o .: "bytes"
+        byKind _ = fail "unknown fault kind"
+    byKind kind
 instance ToJSON Target where
   toJSON t =
     object
@@ -172,11 +175,16 @@ instance FromJSON Decision where
     unless (v == 1) $ fail "unsupported timeline version"
     d <- Decision <$> o .: "event" <*> o .: "injection"
     when (eOccurrence (event d) == 0 || eMessageIndex (event d) == 0) $ fail "indices are 1-based"
-    case injection d of
-      Nothing -> pure d
-      Just f ->
-        either (fail . T.unpack) (const (pure d)) (validFault (eMethod (event d)) (eDirection (event d)) f)
+    maybe
+      (pure d)
+      ( \f ->
+          either (fail . T.unpack) (const (pure d)) (validFault (eMethod (event d)) (eDirection (event d)) f)
+      )
+      (injection d)
 
+{- | Check every rule's fault against its targeted method and direction, failing
+on the first offending rule (see 'validFault'). 'Left' carries the reason.
+-}
 validatePolicy :: Policy -> Either Text ()
 validatePolicy = mapM_ (\r -> validFault (tMethod (target r)) (tDirection (target r)) (fault r)) . rules
 
@@ -253,21 +261,32 @@ validFault method direction f
   faultName Delay{} = "delay"
   faultName Abort{} = "abort"
 
+{- | Read and decode a single-document JSON policy file, validating it via the
+'FromJSON' 'Policy' instance ('validatePolicy' runs there). Fails in 'IO' on
+a decode or validation error.
+-}
 readPolicy :: FilePath -> IO Policy
 readPolicy path = L.readFile path >>= either fail pure . eitherDecode
 
+{- | Decode a JSONL timeline: one 'Decision' per line, with the offending
+1-based line number prefixed to any decode error.
+-}
 decodeLines :: L.ByteString -> Either String Timeline
 decodeLines bs = traverse parseLine (zip [(1 :: Int) ..] (LC.lines bs))
  where
-  parseLine (n, line) = case eitherDecode line of
-    Left e -> Left ("timeline line " ++ show n ++ ": " ++ e)
-    Right d -> Right d
+  parseLine (n, line) =
+    either (\e -> Left ("timeline line " ++ show n ++ ": " ++ e)) Right (eitherDecode line)
 
+{- | Read a JSONL timeline file ('decodeLines') and assert its structural
+invariants with 'validateTimeline'. Fails in 'IO' on a decode or validation
+error.
+-}
 readTimeline :: FilePath -> IO Timeline
 readTimeline path = do
   ds <- L.readFile path >>= either fail pure . decodeLines
   _ <- either (fail . T.unpack) pure (validateTimeline ds)
   pure ds
 
+-- | Serialize a timeline to JSONL: one encoded 'Decision' per line.
 writeTimeline :: FilePath -> Timeline -> IO ()
 writeTimeline path = L.writeFile path . LC.unlines . map encode
