@@ -13,7 +13,8 @@ failure to a minimal witness.
 The scheduler, replay checks, output-tree comparison, and shrinking decisions are
 **pure Haskell**. [grapesy][grapesy] handles the wire. A continuous **chaos
 monkey** drives randomized fault policies and adversarial clients and freezes
-every finding as a replayable reproducer.
+finding evidence, including proxy policies and timelines when available. A
+frozen finding still needs a confirmed reproduction before minimization.
 
 ## Why
 
@@ -89,8 +90,8 @@ unary message as a single whole-message chunk. The supported-method allow-list i
 `validFault` covers nine REAPI methods (ByteStream `Read`/`Write`; CAS
 `FindMissingBlobs`/`BatchUpdateBlobs`/`BatchReadBlobs`/`GetTree`; ActionCache
 `GetActionResult`/`UpdateActionResult`; `Capabilities/GetCapabilities`); see
-[`docs/fault-dsl.md`](docs/fault-dsl.md) for the exact set. Methods outside it
-pass through. Targets
+[`docs/fault-dsl.md`](docs/fault-dsl.md) for the exact set. Other methods listed in the proxy handler table pass through without injected
+faults; unregistered methods are not proxied. Targets
 can constrain `direction`, `occurrence`, `messageIndex`, `minBlobBytes`,
 `maxBlobBytes`, `afterMicros`, and `beforeMicros`. The first matching rule owns
 the event; its `chancePpm` defaults to 1,000,000. Exactly one SplitMix64 step is
@@ -118,15 +119,20 @@ consumed per observed message.
   --signature my-repro --check 'python3 my_checker.py'
 ```
 
-The JSONL timeline is self-contained for replay: each row stores the observed
-event and its selected fault (including `null` for no fault). The determinism
+The JSONL timeline stores the decisions needed for replay: each row contains an observed
+event fingerprint and its selected fault (including `null` for no fault). It
+does not store request payloads or server state; replay requires the workload to
+produce matching traffic again. The determinism
 contract is **same policy + seed + event trace ⇒ same decisions**. Replay reports
 divergence instead of guessing. The oracle compares relative paths, SHA256 file
 digests and sizes, executable bits, symlink targets, and directories, ignoring
 timestamps. It reports `equivalent` (exit 0), `diverged` (exit 1), or
-`inconclusive` (exit 2); `inconclusive` means an input was not a completed
-`Built` tree, so `compareBuilds` had nothing to judge. The shrinker is deletion-1-minimal for a repeatable checker under the
-stated intensity steps.
+`inconclusive` (exit 2) when a directory cannot be snapshotted. The CLI assumes
+the supplied trees came from completed successful builds; it cannot infer build
+success from a directory. The library also returns `Inconclusive` for failed or
+timed-out builds. The shrinker is deletion-1-minimal after an exhausted search
+with a repeatable, conclusive checker. It reports `inconclusive` if unresolved
+checker outcomes prevent that claim, and `trial-limit` if the search budget ends.
 
 ## Commands
 
@@ -144,8 +150,10 @@ stated intensity steps.
 [`scripts/chaos-monkey.py`](scripts/chaos-monkey.py) runs continuously against a
 live endpoint. Each iteration draws a seed and either drives a randomized fault
 policy through the gateway or runs a randomized adversarial direct client, then
-checks a fixed set of invariants, deduplicates findings by signature, and freezes
-replayable reproducers.
+checks a fixed set of invariants, deduplicates findings by signature, and saves
+finding evidence. Proxy timelines can drive replay when the workload reproduces
+the recorded traffic; direct findings need their workload and backend conditions
+recreated. Adaptive feedback and a seed alone do not recreate a campaign.
 
 ```sh
 nix develop --command python3 scripts/chaos-monkey.py --host 127.0.0.1 --port 50070
@@ -186,13 +194,14 @@ behind the pure-core / IO-shell split, the determinism model, and replay.
 |---|---|
 | `examples/` | `fault-policy.json`, the complete one-file policy example; `examples/chaos/*.json5`, NativeLink server configs for isolated local endpoints used in reproductions, mapped to their roles and launch commands in [`examples/chaos/README.md`](examples/chaos/README.md) |
 | `scripts/` | `chaos-monkey.py`, build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
-| `reports/` | Dated investigation write-ups and their captured evidence under `reports/evidence/` |
+| `runs/` | Local, ignored run artifacts: timelines, outcomes, summaries, and reproducer evidence |
 | `proto/` | Vendored `remote-apis` and `googleapis` protocol definitions with their licenses |
 | `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`tutorial.md`](docs/tutorial.md) (end-to-end walkthrough), [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
 
 ## Develop
 
 ```sh
+nix flake check       # complete validation gate; the same command runs in CI
 nix develop
 bash scripts/build.sh
 bash scripts/test.sh
@@ -201,6 +210,12 @@ bash scripts/test.sh
 Protocol definitions are vendored from pinned, public `bazelbuild/remote-apis` and
 `googleapis/googleapis` commits; generated Haskell is included. Tests use an
 independent Python gRPC peer plus QuickCheck properties for the core.
+`nix flake check` builds and tests the source tarball and developer wrapper,
+runs the Python contracts, local adapter tests, consistency and process
+self-tests, and wire suite against the built executable. It also checks script
+syntax, Haskell formatting/lint, generated protobuf and conformance corpus drift,
+Haddock, package metadata, and every Lean module. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md#build-and-test) for the check inventory.
 
 API documentation (Haddock) is published at
 <https://b7r6.github.io/rechaos/>; build it locally with `nix build .#docs` and

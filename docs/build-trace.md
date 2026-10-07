@@ -57,8 +57,9 @@ digests across runs and hosts.
 
 Blob content is `shake_256(graph_id, label)` truncated to the chosen size, so
 content is stable and collisions across labels are negligible. Action-metadata
-blobs (Command / empty input-root Directory / Action) are serialized protobufs,
-hashed as-is.
+blobs (Command / input-root Directory / Action) are deterministically serialized
+protobufs. The root names every input by its digest and size, so input changes
+change the action digest.
 
 The **Action digest** is what the ActionCache is keyed on. It is built from the
 Command digest + input-root digest + platform, so two targets whose command and
@@ -93,7 +94,8 @@ GetActionResult(action)                       # expect MISS on first encounter
 Targets within a layer run concurrently (`--concurrency`); layers run in order,
 so every dependency's output exists before a dependent references it.
 
-Integrity is checked on the wire: uploaded blobs are re-read from CAS and the
+Integrity is checked on the wire: every performed upload must acknowledge the
+exact size, is re-read from CAS, and is checked again for presence. The
 SHA256 of the returned bytes is compared against the digest the generator
 computed locally. Any mismatch is recorded in `errors` and makes the process
 exit non-zero.
@@ -101,7 +103,9 @@ exit non-zero.
 `--execute` is **off by default**: many dev REAPI servers expose CAS + AC but no
 worker, so the tool synthesizes the `ActionResult` itself and exercises the
 AC put/get round-trip without a real execution. Turn it on against a fleet that
-has a scheduler/worker.
+has a scheduler/worker. This optional step checks a terminal successful
+ExecuteResponse; outputs in the cache workload are still synthesized by the
+driver, not derived from a real compiler invocation.
 
 ## Subcommands
 
@@ -124,14 +128,19 @@ counts, and any errors). Optional outputs: `--trace` (RPC JSONL), `--graph-out`
 ### record / replay
 
 `record` is `generate` with a mandatory trace + graph descriptor, which together
-are everything `replay` needs. Because the graph is re-synthesized from its
-recorded parameters (`graph_id`, `instance`, counts) under the **same `--seed`**,
-the replayer reconstructs identical blob bytes/digests without storing payloads
-in the trace.
+contain the workload reconstruction data. The version 2 descriptor stores
+every generated blob label, size, and digest plus the exact graph edges. The
+replayer regenerates bytes from those descriptors and checks their digests,
+without inferring generator parameters from summary counts. The graph file also
+records the trace count, canonical SHA256, and whether recording completed
+without errors. Replay rejects failed recordings and changed, reordered, or
+truncated traces before opening a connection.
 
 ## Trace format (JSONL)
 
-One JSON object per line, in issue order:
+One JSON object per completed recorded operation, in synchronized completion
+order. This is a sequential replay trace, not a recording of the concurrent
+invocation/response intervals:
 
 ```json
 {"seq":0,"method":"...ContentAddressableStorage/FindMissingBlobs",
@@ -149,28 +158,36 @@ verify outcomes. Recorded method shapes:
 | `FindMissingBlobs`   | `digests[]`              | `missing[]`                   |
 | `ByteStream/Write`   | `sha256`, `size`         | `committedBytes`              |
 | `ByteStream/Read`    | `sha256`, `size`         | `bytes`, `sha256`, `verified` |
-| `GetActionResult`    | `actionDigest`           | `hit`, `missCode`             |
+| `GetActionResult`    | `actionDigest`           | `hit`, `missCode`, serialized `result` |
 | `UpdateActionResult` | `actionDigest`, `outputDigest` | `ok`                    |
 | `Execution/Execute`  | `actionDigest`           | `operation`, `done`           |
 
 ## Round-trip verification
 
-`replay` re-issues each recorded RPC and asserts monotonic, store-consistent
-outcomes (a CAS/AC store only grows):
+`replay` reconstructs all blob bytes and graph edges from the version 2 graph
+descriptor and verifies every stored digest before issuing traffic. Earlier
+descriptors omit private blob sizes and cannot be reconstructed reliably; record
+again to produce version 2. No seed guessing is used.
+
+Replay checks use a no-eviction workload assumption:
 
 - **FindMissingBlobs**: the replayed missing set must be a **subset** of the
   recorded missing set (blobs recorded as present must still be present).
-- **GetActionResult**: any action recorded as a **hit** must still hit.
-- **Read**: the readback SHA256 must equal the requested digest.
-- **Write / UpdateActionResult**: re-applied idempotently so later asserts hold.
-- **Execute**: not replayed by default (environment-dependent).
+- **GetActionResult**: a recorded hit must still hit with the recorded result,
+  excluding execution metadata. Transport errors cannot count as cache misses.
+- **Read**: size and hash must match both the requested blob and recording.
+- **Write / UpdateActionResult**: committed sizes and returned results are checked.
+- **Execute**: counted as skipped because this replayer does not reproduce execution.
+- Unknown methods and missing graph blobs fail instead of counting as replayed.
 
-Mismatches are collected; `roundTripOk` is true iff empty, and the process exits
-non-zero otherwise.
+`roundTripOk` is true only when there are no mismatches or skipped operations.
+Exit 0 means verified, 1 means mismatches, and 2 means incomplete/invalid replay.
+Replaying a cache workload does not recreate the original concurrency schedule.
 
 ## Determinism
 
-Everything derives from `--seed` + `--graph-id`:
+Generated structure and bytes depend on all graph parameters, including
+`--seed`, `--graph-id`, target/layer counts, and input/dependency bounds:
 
 - graph structure (layers, inputs, deps) via a seeded `random.Random`,
 - blob content via `shake_256(graph_id, label)`,
@@ -178,22 +195,13 @@ Everything derives from `--seed` + `--graph-id`:
 
 Upload resource names use fresh UUIDs (as a real client does); these do not
 affect digests or cache keys, so determinism of the *content-addressed* state is
-preserved. Re-running the same seed against a warm cache yields all AC **hits**
-(idempotent).
+preserved. Re-running the same graph against an unchanged warm cache should
+yield AC hits. Cache eviction, other writers, faults, and scheduling can change
+responses and trace ordering.
 
-## Validated
+## Validation
 
-Against a live local NativeLink at `127.0.0.1:50052` (instance `main`, SHA256):
-
-- `generate` of a 6-target / 2-layer graph: 34 uploads, 6 AC misses, 6
-  `UpdateActionResult`, 6 post-put AC hits, 6 output readbacks all verified,
-  0 errors; dedup ratio 0.49.
-- Re-running the same seed: all 6 targets report AC **hit** with no re-upload --
-  idempotent against a warm cache.
-- `FindMissingBlobs` transition observed in the trace: first call reports blobs
-  missing, the subsequent `Write`s make them present.
-- Full AC lifecycle observed for a single action digest:
-  `GetActionResult:miss -> UpdateActionResult -> GetActionResult:hit`.
-- `record` of a tiny graph (32 RPCs) then `replay`: all 32 RPCs re-driven,
-  `roundTripOk: true`, zero mismatches.
-```
+`test/python_contracts.py` exercises graph descriptor reconstruction, digest
+corruption rejection, action dependence on inputs, wrong upload accounting,
+transport errors, cached-output mismatches, and record/replay against the local
+independent gRPC fixture. Those tests run in `nix flake check`.

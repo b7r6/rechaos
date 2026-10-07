@@ -11,22 +11,41 @@ represents the zero-rate case explicitly.
 ## Build and test
 
 ```sh
+nix flake check       # complete validation gate, also used by CI
 nix build              # builds the gateway and runs the pure core checks
 nix develop            # dev shell: ghc, cabal, fourmolu, hlint, python+grpc, protobuf
-bash scripts/test.sh   # generates the Python bindings and runs the wire-level checks
+bash scripts/test.sh   # focused core, Python, adapter, and wire tests while developing
 ```
 
-Tests are the pure-core QuickCheck/HUnit suite (`test/CoreSpec.hs`, run by
-`nix build`) plus an independent Python gRPC peer (`test/integration.py`) that
-exercises forwarding, metadata, all faults, deadlines, replay, and shrinking.
+`nix flake check` is the complete repository gate on the current system:
+
+| Check | Coverage |
+|---|---|
+| `test` | Build the source tarball and run the core QuickCheck properties and goldens. |
+| `devBuild` | Run the documented `scripts/build.sh` workflow and core suite against the pinned installed packages. |
+| `wire` | Generate Python bindings; run all `test/*_contracts.py` regressions, consistency and process self-tests, and the independent gRPC integration suite. Includes HTTP/2 and S3 loopback peers and a bounded concurrent load test. |
+| `syntax` | Compile every Python script and test; parse every shell script. |
+| `conformance` | Regenerate the Haskell/Lean corpora and reject differences from the committed files. |
+| `protos` | Regenerate all Haskell protobuf modules and reject differences. |
+| `format` / `lint` | Check all handwritten Haskell, including `Setup.hs` and the corpus generator. |
+| `docs` | Build the package's Haddock documentation. |
+| `cabalCheck` | Check package metadata and create the source tarball consumed by `test` and `docs`. |
+| `lean` | Reject proof holes and added axioms; compile every Lean module with warnings as errors. |
+
+All runtime tests use owned local fixtures. Campaigns against external REAPI,
+execution, or object-store services remain explicit operational runs; passing
+this gate establishes the tested tool behavior, not a live server's correctness.
+New Python contract files matching `*_contracts.py` are discovered automatically.
 
 ### Reproducible cabal builds
 
-A committed `cabal.project` pins the Hackage `index-state:` so a plain cabal
-build resolves a stable plan over time. Inside `nix develop`, `cabal build all`
-and `cabal test core` work directly (they back `scripts/build.sh` and
-`scripts/test.sh`). The nix flake remains the authoritative, byte-reproducible
-build; cabal resolves its own plan and may differ from the nix pin.
+A committed `cabal.project` pins the Hackage index for separate cabal-install
+builds. Inside `nix develop`, use `scripts/build.sh` and `scripts/test.sh`:
+they run Cabal's `Setup.hs` driver against the installed Nix package set. This
+avoids the solver conflict between the intentionally coexisting random 1.2 and
+1.3 dependency closures. The package definition remains `rechaos.cabal`.
+`RECHAOS_BUILD_DIR` can move build artifacts from `.build/cabal` to another
+directory. The Nix flake remains the authoritative packaged build.
 
 ### Editor / IDE
 
@@ -38,7 +57,7 @@ implicit-cradle discovery.
 ## Style
 
 - Format with the committed config before sending a change:
-  `fourmolu --mode inplace $(git ls-files '*.hs')`
+  `nix fmt`
 - Code is `GHC2021` + `-Wall`; keep it warning-clean.
 - Match the surrounding code: explicit units, no partial functions in the core,
   comment density and naming consistent with the module you are touching.

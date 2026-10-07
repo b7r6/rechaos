@@ -214,7 +214,8 @@ section states it exactly.
 
 A target's `method` must name one of the methods in the `supportedMethods`
 allow-list. A target naming any other method is rejected with `policy targets an
-unsupported method`; all other REAPI methods pass through untouched. The current
+unsupported method`. Additional methods in the proxy handler table are
+forwarded without fault injection; unregistered methods are not proxied. The current
 allow-list is:
 
 - `google.bytestream.ByteStream/Read`

@@ -52,6 +52,20 @@ The `inv`/`res` pair defines each op's **real-time interval**. Op *a* is forced
 before op *b* iff `a.res < b.inv` (they do not overlap and *a* finished first).
 Overlapping ops are concurrent and may be ordered either way.
 
+The history must include all writes and evictions for the keys under test,
+starting from known-empty registers (except the REAPI empty CAS blob, which is
+always present). Use fresh keys or include setup writes. Hidden writers,
+unobserved eviction, pre-existing AC state, partial/range reads, or unresolved
+failed writes invalidate that interpretation. Failed writes may have committed;
+the checker rejects such histories as inconclusive until outcomes are resolved.
+Malformed timestamps, operations, outcomes, and missing successful-value
+fingerprints are rejected. CLI exit 2 means invalid/inconclusive input.
+
+This is a selected consistency model, not the full REAPI specification. The
+vendored protocol leaves CAS lifetimes implementation-specific and permits
+semantically equivalent AC result rewrites. A violation of the model needs those
+assumptions checked before attributing a protocol defect to a server.
+
 ## The checks
 
 ### C1 — content-addressing
@@ -60,9 +74,10 @@ Overlapping ops are concurrent and may be ordered either way.
 
 For a CAS/ByteStream key `sha256:HEX/SIZE`, the only legal value is `HEX`. Any
 `read` with outcome `ok` whose `value_hash != HEX` is a violation (a torn read, a
-stale/wrong blob under the right name, wrong bytes for a range). Writes are
+stale/wrong blob under the right name, wrong bytes for a full-blob read). Writes are
 checked symmetrically: a committed write must claim the key's own digest. AC keys
-do not encode their value, so C1 is skipped for them (C3 covers AC). Implemented
+do not encode their value, so C1 is skipped for them (C3 covers AC). If a byte
+size is recorded, it must also match the size in the CAS key. Implemented
 in `check_content_addressing`.
 
 ### C2 — monotone availability
@@ -71,13 +86,12 @@ in `check_content_addressing`.
 > that completion must observe K as present — unless an eviction is modelled in
 > the interim.
 
-Let `t*` be the response time of the first completed (`ok`) write of K. Any op
-with `inv > t*` that observes K absent (`read -> missing`, or
-`find_missing -> absent`) is a violation **unless** a modelled `evict` falls in
-`[t*, inv]`. An op that *began before* `t*` may legitimately miss (the write was
-not yet visible when it started) and is not flagged. This is the
-partial-publication / disappearing-blob detector. Implemented in
-`check_monotone_availability`.
+For each absence observation, check completed writes that finished before it
+began. A write forces presence if no modelled eviction overlaps that write or
+falls between its invocation and the observation's response. An eviction during
+the observation can explain absence. A later completed write restores the
+presence obligation; an older eviction cannot excuse absence forever. C3 also
+checks the joint ordering of writes, reads, presence probes, and evictions.
 
 ### C3 — linearizability of the per-key register
 
@@ -102,8 +116,10 @@ Setup. From a key's events we build register operations:
 - `write(v)` from each completed write; an `evict` becomes an implicit
   `write(∅)` at its instant (it empties the register).
 - `read -> v` from each read (`v = ∅` for a `missing` read).
-- `find_missing` and errored ops do **not** constrain the register value and are
-  excluded from C3 (availability is C2's job).
+- `find_missing` constrains whether the register is empty at its linearization
+  point, so presence probes share the same ordering as reads and writes.
+- Failed reads do not constrain the value. Failed writes require outcome
+  resolution before checking.
 
 Decision procedure (`search`), maintaining a set of not-yet-linearized ops and
 the current register value (initially `∅`):
@@ -118,8 +134,8 @@ the current register value (initially `∅`):
 3. **Commit & recurse.** Tentatively commit a candidate, recurse on the smaller
    problem. If the recursion succeeds the whole history is linearizable.
 4. **Backtrack.** On a dead end, undo and try the next candidate. We **memoize**
-   failed `(remaining-op-set, register-value)` states so the search does not
-   re-explore an equivalent dead end — this keeps it fast on concurrent runs.
+   visited `(remaining-op-set, register-value)` states so the search does not
+   re-explore an equivalent state — this keeps it fast on concurrent runs.
 
 If every op commits, the history is **linearizable** and C3 passes. If the search
 exhausts all orderings, the history is **not** linearizable and we emit a
@@ -137,9 +153,10 @@ Soundness/complexity notes. The real-time precedence check makes the procedure
 **sound** (it accepts only histories with a genuine real-time-respecting
 sequential witness) and **complete** for a single register (it explores every
 admissible linearization point via backtracking). Worst case is exponential in
-the number of mutually-concurrent ops on one key, but real recorded histories
-have small concurrency per key, and the memo table collapses the common cases;
-in practice the per-key search is milliseconds.
+the number of mutually concurrent operations on one key. The iterative search
+avoids Python recursion limits, but no general time or memory bound is promised.
+A successful check establishes existence of a witness for the recorded history
+under the stated model and assumptions, not correctness on future histories.
 
 ## Feeding it histories
 
