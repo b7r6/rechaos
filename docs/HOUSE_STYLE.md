@@ -230,11 +230,17 @@ identity/fail-closed/coverage) are proved over core Lean — no Mathlib, no forc
 `UInt64` evaluation. The **no-`sorry` policy** is absolute: zero `sorry`, zero
 `admit`, no new `axiom`.
 
-Because the Lean today *mirrors* Haskell, it uses Haskell's camelCase names on
-purpose — the 1:1 correspondence is the point. The Straylight systems-Lean style
-(snake_case, via `lean4fmt`) is deferred to the milestone where Lean becomes the
-implementation rather than a shadow; at that point the mirror constraint
-dissolves and we migrate naming with the identity-aware renamer.
+The Lean core follows the **Straylight systems-Lean style**: `snake_case` on every
+naming axis (namespaces, types, theorems, terms), applied by `lean4fmt`'s
+identity-aware renamer and layout pass, on the Lean 4.31 toolchain (pinned via
+`lean4-nix`). Reference-leads still holds — the Haskell stays the authority and
+keeps its own camelCase — so the two sides no longer share spellings; the
+Haskell↔Lean name correspondence is documented in
+[`formal.md`](formal.md)'s definition maps. A small set of identifiers keep their
+original casing where the snake form would collide with a field or sibling of the
+same name (e.g. `Fault`/`Event`/`Target`/`Direction`/`Fingerprint` vs their
+projections, and `eventKey`/`EventKey` which both map to `event_key`); these are
+the renamer's principled, build-validated exceptions.
 
 ## Python harnesses
 

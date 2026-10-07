@@ -32,21 +32,18 @@ set_option autoImplicit false
     SAME failure signature, not merely a nonzero exit code: a flaky, timeout, or
     infrastructure result is `unknown` and is treated conservatively (the
     candidate is discarded, not accepted). Mirrors the Haskell `Verdict`. -/
-inductive MinimizeVerdict
-  | /-- The candidate reproduced the original failure signature. -/
-    triggers
-  | /-- The candidate ran but did not reproduce the failure. -/
-    doesNotTrigger
-  | /-- The run was inconclusive (flake, timeout, infrastructure error). -/
-    unknown
+inductive minimize_verdict
+  | /-- The candidate reproduced the original failure signature. -/ triggers
+  | /-- The candidate ran but did not reproduce the failure. -/ doesNotTrigger
+  | /-- The run was inconclusive (flake, timeout, infrastructure error). -/ unknown
   deriving Repr, DecidableEq, Inhabited
 
 /-- The minimizer's state: the best (smallest) timeline known to trigger so far,
     and the queue of candidates still to try against it. Mirrors the Haskell
     `ShrinkState`. -/
-structure ShrinkState where
-  best    : Timeline
-  pending : List Timeline
+structure shrink_state where
+  best    : timeline
+  pending : List timeline
   deriving Repr, DecidableEq, Inhabited
 
 /-- Strictly weaker variants of a fault, if any, used for intensity shrinking.
@@ -60,11 +57,11 @@ structure ShrinkState where
 def weaker (anchor : Event) : Fault → List Fault
   | .delay micros => if micros > 0 then [.delay (micros / 2)] else []
   | .dribble rate chunk =>
-      let cap := Nat.max 1 (anchor.messageBytes * microsPerSecond)
-      if rate < cap then [.dribble (Nat.min cap (Nat.max 1 rate * 2)) chunk] else []
+    let cap := Nat.max 1 (anchor.message_bytes * micros_per_second)
+    if rate < cap then [.dribble (Nat.min cap (Nat.max 1 rate * 2)) chunk] else []
   | .truncate keep =>
-      let cap := anchor.messageBytes
-      if keep < cap then [.truncate (keep + Nat.max 1 ((cap - keep) / 2))] else []
+    let cap := anchor.message_bytes
+    if keep < cap then [.truncate (keep + Nat.max 1 ((cap - keep) / 2))] else []
   | .corrupt n => if n > 1 then [.corrupt (n / 2)] else []
   | .abort _ => []
 
@@ -73,26 +70,25 @@ def weaker (anchor : Event) : Fault → List Fault
     so Lean accepts it without a termination proof over `n / 2`. Mirrors the
     Haskell `descending`. -/
 def descending : Nat → Nat → List Nat
-  | 0, _ => []
-  | _, 0 => []
-  | _ + 1, 1 => [1]
+  | 0, _           => []
+  | _, 0           => []
+  | _ + 1, 1       => [1]
   | fuel + 1, size => size :: descending fuel (size / 2)
 
 /-- The offsets `0, step, 2*step, …` strictly below `limit`. A structurally
     recursive enumeration on fuel (the list length is an ample bound), mirroring
     the Haskell comprehension `[0, k .. n - 1]`. -/
-def strideOffsets (fuel : Nat) (step : Nat) (start : Nat) (limit : Nat) : List Nat :=
+def stride_offsets (fuel : Nat) (step : Nat) (start : Nat) (limit : Nat) : List Nat :=
   match fuel with
   | 0 => []
   | fuel + 1 =>
-      if start < limit then start :: strideOffsets fuel step (start + Nat.max 1 step) limit
-      else []
+    if start < limit then start :: stride_offsets fuel step (start + Nat.max 1 step) limit else []
 
 /-- Deduplicate a list of timelines, preserving first-seen order. The reference
     uses `Data.List.nub`; here equality is `DecidableEq` on `Timeline`. -/
-def nubTimelines : List Timeline → List Timeline
-  | [] => []
-  | tl :: rest => tl :: nubTimelines (rest.filter (fun other => other != tl))
+def nub_timelines : List timeline → List timeline
+  | []         => []
+  | tl :: rest => tl :: nub_timelines (rest.filter (fun other => other != tl))
   termination_by timelines => timelines.length
   decreasing_by
     simp_wf
@@ -105,37 +101,45 @@ def nubTimelines : List Timeline → List Timeline
     intensity candidates follow a finite, decreasing measure (see `weaker`), and
     timing stays explicit in the retained event identity and `delay` value.
     Mirrors the Haskell `candidates`. -/
-def candidates (timeline : Timeline) : List Timeline :=
-  let len := timeline.length
+def candidates (tl : timeline) : List timeline :=
+  let len := tl.length
   let sizes := descending len len
   let deletions :=
-    sizes.flatMap (fun chunk =>
-      (strideOffsets (len + 1) chunk 0 len).map (fun offset =>
-        timeline.take offset ++ timeline.drop (offset + chunk)))
+    sizes.flatMap
+      (
+        fun chunk =>
+          (stride_offsets (len + 1) chunk 0 len).map
+            (fun offset => tl.take offset ++ tl.drop (offset + chunk))
+      )
   let intensities :=
-    timeline.zipIdx.flatMap (fun pair =>
-      let decision := pair.1
-      let offset := pair.2
-      match decision.injection with
-      | none => []
-      | some old =>
-          (weaker decision.event old).map (fun replacement =>
-            timeline.take offset
-              ++ [{ decision with injection := some replacement }]
-              ++ timeline.drop (offset + 1)))
-  nubTimelines (deletions ++ intensities)
+    tl.zipIdx.flatMap
+      (
+        fun pair =>
+          let dec := pair.1
+          let offset := pair.2
+          match dec.injection with
+          | none => []
+          | some old =>
+            (weaker dec.event old).map
+              (
+                fun replacement =>
+                  tl.take offset ++ [{ dec with injection := some replacement }]
+                      ++ tl.drop (offset + 1)
+              )
+      )
+  nub_timelines (deletions ++ intensities)
 
 /-- Seed the state machine from a failing timeline. Keeps only its injected
     faults as the initial `best` and enqueues their `candidates`. Mirrors the
     Haskell `start`. -/
-def start (timeline : Timeline) : ShrinkState :=
-  let faults := timeline.filter (fun decision => decision.injection.isSome)
+def start (tl : timeline) : shrink_state :=
+  let faults := tl.filter (fun dec => dec.injection.isSome)
   { best := faults, pending := candidates faults }
 
 /-- The next candidate timeline to test, or `none` when the queue is empty and
     shrinking has converged on `best`. Mirrors the Haskell `candidate`. -/
-def candidate : ShrinkState → Option Timeline
-  | { pending := [], .. } => none
+def candidate : shrink_state → Option timeline
+  | { pending := [], .. }        => none
   | { pending := next :: _, .. } => some next
 
 /-- Fold the shell's `Verdict` on the current candidate back into the state. On
@@ -144,13 +148,13 @@ def candidate : ShrinkState → Option Timeline
     `doesNotTrigger` or `unknown` the candidate is discarded and the next one is
     tried. Conservative: an `unknown` never advances `best`. Mirrors the Haskell
     `observe`. -/
-def observe (verdict : MinimizeVerdict) (state : ShrinkState) : ShrinkState :=
+def observe (vdt : minimize_verdict) (state : shrink_state) : shrink_state :=
   match state.pending with
   | [] => state
   | next :: rest =>
-      match verdict with
-      | .triggers => { best := next, pending := candidates next }
-      | _ => { best := state.best, pending := rest }
+    match vdt with
+    | .triggers => { best := next, pending := candidates next }
+    | _         => { best := state.best, pending := rest }
 
 -- ── termination measure ───────────────────────────────────────────────────────
 
@@ -163,31 +167,32 @@ def observe (verdict : MinimizeVerdict) (state : ShrinkState) : ShrinkState :=
 def severity (anchor : Event) : Fault → Nat
   | .delay micros => micros
   | .abort _ => 0
-  | .truncate keep => anchor.messageBytes - Nat.min anchor.messageBytes keep
+  | .truncate keep => anchor.message_bytes - Nat.min anchor.message_bytes keep
   | .corrupt n => n
   | .dribble rate _ =>
-      let cap := Nat.max 1 (anchor.messageBytes * microsPerSecond)
-      cap - Nat.min cap rate
+    let cap := Nat.max 1 (anchor.message_bytes * micros_per_second)
+    cap - Nat.min cap rate
 
 /-- The summed intensity of every injected fault in a timeline. The second
     component of the well-founded shrink measure. -/
-def summedIntensity : Timeline → Nat
+def summed_intensity : timeline → Nat
   | [] => 0
-  | decision :: rest =>
-      (match decision.injection with
-       | none => 0
-       | some fault => severity decision.event fault)
-      + summedIntensity rest
+  | dec :: rest =>
+    (
+      match dec.injection with
+      | none     => 0
+      | some flt => severity dec.event flt
+    )
+        + summed_intensity rest
 
 /-- The well-founded shrink measure: `(length, summed-intensity)`, ordered
     lexicographically. Every generated candidate is strictly smaller under it, so
     the shrink loop terminates. -/
-def measure (timeline : Timeline) : Nat × Nat :=
-  (timeline.length, summedIntensity timeline)
+def measure (tl : timeline) : Nat × Nat := (tl.length, summed_intensity tl)
 
 /-- Lexicographic strictly-less on the `(length, summed-intensity)` measure:
     shorter wins outright; on a length tie, lower summed intensity wins. -/
-def measureLt (left right : Nat × Nat) : Prop :=
+def measure_lt (left right : Nat × Nat) : Prop :=
   left.1 < right.1 ∨ (left.1 = right.1 ∧ left.2 < right.2)
 
 -- ── abstract theorem: candidate TERMINATION ───────────────────────────────────
@@ -197,104 +202,105 @@ def measureLt (left right : Nat × Nat) : Prop :=
     cases on the fault with the numeric side-conditions of each `weaker` branch.
     No `UInt64` arithmetic: every quantity here is `Nat`. -/
 theorem weaker_severity_lt
-    (anchor : Event) (old new : Fault) (hmem : new ∈ weaker anchor old) :
-    severity anchor new < severity anchor old := by
+        (anchor : Event)
+        (old new : Fault)
+        (hmem : new ∈ weaker anchor old)
+        : severity anchor new < severity anchor old := by
   cases old with
   | delay micros =>
-      simp only [weaker] at hmem
-      by_cases hpos : micros > 0
-      · simp only [hpos, if_true, List.mem_singleton] at hmem
-        subst hmem
-        simp only [severity]
-        omega
-      · simp only [hpos, if_false, List.not_mem_nil] at hmem
-  | abort status =>
-      simp only [weaker, List.not_mem_nil] at hmem
+    simp only [weaker] at hmem
+    by_cases hpos : micros > 0
+    · simp only [hpos, if_true, List.mem_singleton] at hmem
+      subst hmem
+      simp only [severity]
+      omega
+    · simp only [hpos, if_false, List.not_mem_nil] at hmem
+  | abort stat => simp only [weaker, List.not_mem_nil] at hmem
   | truncate keep =>
-      simp only [weaker] at hmem
-      by_cases hlt : keep < anchor.messageBytes
-      · simp only [hlt, if_true, List.mem_singleton] at hmem
-        subst hmem
-        simp only [severity]
-        -- The new keep count is `keep + bump` with `bump = max 1 ((mb-keep)/2)`.
-        -- `1 ≤ bump ≤ mb - keep`, so the new keep strictly increases yet stays
-        -- within the message, and both `min`s resolve to their right argument.
-        have hbump_lo : (1 : Nat) ≤ Nat.max 1 ((anchor.messageBytes - keep) / 2) :=
-          Nat.le_max_left 1 _
-        have hbump_hi : Nat.max 1 ((anchor.messageBytes - keep) / 2)
-            ≤ anchor.messageBytes - keep := by
-          apply Nat.max_le.mpr
-          refine ⟨by omega, ?_⟩
-          exact Nat.le_trans (Nat.div_le_self _ 2) (Nat.le_refl _)
-        have hkeep : Nat.min anchor.messageBytes keep = keep :=
-          Nat.min_eq_right (Nat.le_of_lt hlt)
-        have hnew : Nat.min anchor.messageBytes
-            (keep + Nat.max 1 ((anchor.messageBytes - keep) / 2))
-            = keep + Nat.max 1 ((anchor.messageBytes - keep) / 2) :=
-          Nat.min_eq_right (by omega)
-        rw [hkeep, hnew]
-        omega
-      · simp only [hlt, if_false, List.not_mem_nil] at hmem
+    simp only [weaker] at hmem
+    by_cases hlt : keep < anchor.message_bytes
+    · simp only [hlt, if_true, List.mem_singleton] at hmem
+      subst hmem
+      simp only [severity]
+      -- The new keep count is `keep + bump` with `bump = max 1 ((mb-keep)/2)`.
+      -- `1 ≤ bump ≤ mb - keep`, so the new keep strictly increases yet stays
+      -- within the message, and both `min`s resolve to their right argument.
+      have hbump_lo : (1 : Nat) ≤ Nat.max 1 ((anchor.message_bytes - keep) / 2) :=
+        Nat.le_max_left 1 _
+      have hbump_hi : Nat.max 1 ((anchor.message_bytes - keep) / 2) ≤ anchor.message_bytes - keep := by
+        apply Nat.max_le.mpr
+        refine ⟨by omega, ?_⟩
+        exact Nat.le_trans (Nat.div_le_self _ 2) (Nat.le_refl _)
+      have hkeep : Nat.min anchor.message_bytes keep = keep := Nat.min_eq_right (Nat.le_of_lt hlt)
+      have hnew :
+          Nat.min anchor.message_bytes (keep + Nat.max 1 ((anchor.message_bytes - keep) / 2))
+              = keep + Nat.max 1 ((anchor.message_bytes - keep) / 2) := Nat.min_eq_right (by omega)
+      rw [hkeep, hnew]
+      omega
+    · simp only [hlt, if_false, List.not_mem_nil] at hmem
   | corrupt n =>
-      simp only [weaker] at hmem
-      by_cases hgt : n > 1
-      · simp only [hgt, if_true, List.mem_singleton] at hmem
-        subst hmem
-        simp only [severity]
-        omega
-      · simp only [hgt, if_false, List.not_mem_nil] at hmem
+    simp only [weaker] at hmem
+    by_cases hgt : n > 1
+    · simp only [hgt, if_true, List.mem_singleton] at hmem
+      subst hmem
+      simp only [severity]
+      omega
+    · simp only [hgt, if_false, List.not_mem_nil] at hmem
   | dribble rate chunk =>
-      simp only [weaker] at hmem
-      by_cases hlt : rate < Nat.max 1 (anchor.messageBytes * microsPerSecond)
-      · simp only [hlt, if_true, List.mem_singleton] at hmem
-        subst hmem
-        simp only [severity]
-        -- Abbreviate the cap as `cap`; the new rate is `min cap (max 1 rate * 2)`,
-        -- which is strictly greater than `rate` yet still at most `cap`. Resolve
-        -- every `min` to a plain term, then the subtraction inequality is linear.
-        generalize hc : Nat.max 1 (anchor.messageBytes * microsPerSecond) = cap at *
-        have hnewle : Nat.min cap (Nat.max 1 rate * 2) ≤ cap := Nat.min_le_left _ _
-        have hgt : rate < Nat.max 1 rate * 2 := by
-          have hup : rate ≤ Nat.max 1 rate := Nat.le_max_right 1 rate
-          have hpos : (1 : Nat) ≤ Nat.max 1 rate := Nat.le_max_left 1 rate
-          omega
-        have hge : rate < Nat.min cap (Nat.max 1 rate * 2) :=
-          Nat.lt_min.mpr ⟨hlt, hgt⟩
-        have hinner : Nat.min cap (Nat.min cap (Nat.max 1 rate * 2))
-            = Nat.min cap (Nat.max 1 rate * 2) := Nat.min_eq_right hnewle
-        have hrate : Nat.min cap rate = rate := Nat.min_eq_right (Nat.le_of_lt hlt)
-        rw [hinner, hrate]
-        -- Goal: `cap - min cap (max 1 rate*2) < cap - rate`, with `rate < that min
-        -- ≤ cap`. `Nat.sub_lt_sub_left` turns it into exactly `rate < min …`.
-        exact Nat.sub_lt_sub_left (Nat.lt_of_lt_of_le hge hnewle) hge
-      · simp only [hlt, if_false, List.not_mem_nil] at hmem
+    simp only [weaker] at hmem
+    by_cases hlt : rate < Nat.max 1 (anchor.message_bytes * micros_per_second)
+    · simp only [hlt, if_true, List.mem_singleton] at hmem
+      subst hmem
+      simp only [severity]
+      -- Abbreviate the cap as `cap`; the new rate is `min cap (max 1 rate * 2)`,
+      -- which is strictly greater than `rate` yet still at most `cap`. Resolve
+      -- every `min` to a plain term, then the subtraction inequality is linear.
+      generalize hc : Nat.max 1 (anchor.message_bytes * micros_per_second) = cap at *
+      have hnewle : Nat.min cap (Nat.max 1 rate * 2) ≤ cap := Nat.min_le_left _ _
+      have hgt : rate < Nat.max 1 rate * 2 := by
+        have hup : rate ≤ Nat.max 1 rate := Nat.le_max_right 1 rate
+        have hpos : (1 : Nat) ≤ Nat.max 1 rate := Nat.le_max_left 1 rate
+        omega
+      have hge : rate < Nat.min cap (Nat.max 1 rate * 2) := Nat.lt_min.mpr ⟨hlt, hgt⟩
+      have hinner :
+          Nat.min cap (Nat.min cap (Nat.max 1 rate * 2)) = Nat.min cap (Nat.max 1 rate * 2) :=
+        Nat.min_eq_right hnewle
+      have hrate : Nat.min cap rate = rate := Nat.min_eq_right (Nat.le_of_lt hlt)
+      rw [hinner, hrate]
+      -- Goal: `cap - min cap (max 1 rate*2) < cap - rate`, with `rate < that min
+      -- ≤ cap`. `Nat.sub_lt_sub_left` turns it into exactly `rate < min …`.
+      exact Nat.sub_lt_sub_left (Nat.lt_of_lt_of_le hge hnewle) hge
+    · simp only [hlt, if_false, List.not_mem_nil] at hmem
 
 /-- `summedIntensity` is additive over list append. Needed to reason about the
     `take _ ++ [replacement] ++ drop _` splice in the intensity candidates. -/
-theorem summedIntensity_append (left right : Timeline) :
-    summedIntensity (left ++ right) = summedIntensity left + summedIntensity right := by
+theorem summed_intensity_append
+        (left right : timeline)
+        : summed_intensity (left ++ right) = summed_intensity left + summed_intensity right := by
   induction left with
-  | nil => simp [summedIntensity]
+  | nil => simp [summed_intensity]
   | cons head tail ih =>
-      simp only [List.cons_append, summedIntensity, ih]
-      omega
+    simp only [List.cons_append, summed_intensity, ih]
+    omega
 
 /-- `summedIntensity` of a singleton is the severity of its (optional) injection. -/
-theorem summedIntensity_singleton (decision : Decision) :
-    summedIntensity [decision]
-      = (match decision.injection with
-         | none => 0
-         | some fault => severity decision.event fault) := by
-  simp [summedIntensity]
+theorem summed_intensity_singleton (dec : decision) : summed_intensity [dec]
+    = (
+      match dec.injection with
+      | none     => 0
+      | some flt => severity dec.event flt
+    ) := by simp [summed_intensity]
 
 /-- Deleting a nonempty contiguous chunk strictly shrinks the length, hence the
     measure. The deletion candidates are `take offset ++ drop (offset + chunk)`
     with `chunk ≥ 1`; their length is `len - chunk < len` whenever the offset lies
     within the timeline. (Stated for the shape the generator produces.) -/
 theorem deletion_length_lt
-    (timeline : Timeline) (offset chunk : Nat)
-    (hchunk : chunk ≥ 1) (hoffset : offset < timeline.length) :
-    (timeline.take offset ++ timeline.drop (offset + chunk)).length < timeline.length := by
+        (tl : timeline)
+        (offset chunk : Nat)
+        (hchunk : chunk ≥ 1)
+        (hoffset : offset < tl.length)
+        : (tl.take offset ++ tl.drop (offset + chunk)).length < tl.length := by
   rw [List.length_append, List.length_take, List.length_drop]
   omega
 
@@ -306,24 +312,26 @@ theorem deletion_length_lt
     the external checker reported `triggers` on. Given a truthful checker, every
     accepted `best` is therefore a confirmed reproduction. -/
 theorem observe_best_triggers
-    (verdict : MinimizeVerdict) (state : ShrinkState)
-    (hchanged : (observe verdict state).best ≠ state.best) :
-    verdict = .triggers
-      ∧ ∃ next rest, state.pending = next :: rest ∧ (observe verdict state).best = next := by
+        (vdt : minimize_verdict)
+        (state : shrink_state)
+        (hchanged : (observe vdt state).best ≠ state.best)
+        : vdt = .triggers
+            ∧ ∃ next rest, state.pending = next :: rest ∧ (observe vdt state).best = next := by
   obtain ⟨sbest, spending⟩ := state
   cases spending with
   | nil => simp [observe] at hchanged
   | cons next rest =>
-      cases verdict with
-      | triggers => exact ⟨rfl, next, rest, rfl, rfl⟩
-      | doesNotTrigger => simp [observe] at hchanged
-      | unknown => simp [observe] at hchanged
+    cases vdt with
+    | triggers => exact ⟨rfl, next, rest, rfl, rfl⟩
+    | doesNotTrigger => simp [observe] at hchanged
+    | unknown => simp [observe] at hchanged
 
 /-- An `unknown` verdict is conservative: it never advances `best`, exactly like
     `doesNotTrigger`. A flake, timeout, or infrastructure error is never mistaken
     for a reproduction. -/
-theorem observe_unknown_preserves_best (state : ShrinkState) :
-    (observe .unknown state).best = state.best := by
+theorem observe_unknown_preserves_best
+        (state : shrink_state)
+        : (observe .unknown state).best = state.best := by
   unfold observe
   cases state.pending with
   | nil => rfl
@@ -331,8 +339,9 @@ theorem observe_unknown_preserves_best (state : ShrinkState) :
 
 /-- `unknown` and `doesNotTrigger` are observationally identical: both discard the
     current candidate and leave `best` untouched. -/
-theorem observe_unknown_eq_doesNotTrigger (state : ShrinkState) :
-    observe .unknown state = observe .doesNotTrigger state := by
+theorem observe_unknown_eq_does_not_trigger
+        (state : shrink_state)
+        : observe .unknown state = observe .doesNotTrigger state := by
   unfold observe
   cases state.pending with
   | nil => rfl

@@ -29,7 +29,7 @@ drivers, and live server scheduling are outside those proofs.
 
 | Concept | Haskell (`src/Rechaos/Core/Scheduler.hs`) | Lean (`lean/Rechaos/Core.lean`) |
 |---|---|---|
-| One SplitMix64 step | `nextSeed :: Word64 -> (Word64, Word64)` | `nextSeed (s : UInt64) : UInt64 × UInt64` |
+| One SplitMix64 step | `nextSeed :: Word64 -> (Word64, Word64)` | `next_seed (s : UInt64) : UInt64 × UInt64` |
 | State-advance increment | `s + 0x9e3779b97f4a7c15` | `s + 0x9e3779b97f4a7c15` |
 | Mixing constants | `0xbf58476d1ce4e5b9`, `0x94d049bb133111eb` | `0xbf58476d1ce4e5b9`, `0x94d049bb133111eb` |
 | Final avalanche shift | `z2 \`xor\` (z2 \`shiftR\` 31)` | `z2 ^^^ (z2 >>> 31)` |
@@ -40,14 +40,14 @@ A note on tuple order, because it matters when reading the two sources together:
 
 - **Haskell** `nextSeed s = (s', output)` returns `(nextState, output)`, so the
   advanced state is `fst (nextSeed s)` and the draw is `snd (nextSeed s)`.
-- **Lean** `nextSeed s = (output, s')` returns `(output, nextState)`, so the
-  advanced state is `(nextSeed s).2` and the draw is `(nextSeed s).1`.
+- **Lean** `next_seed s = (output, s')` returns `(output, nextState)`, so the
+  advanced state is `(next_seed s).2` and the draw is `(next_seed s).1`.
 
 Both expose the same two values; only the projection index differs. The Lean
 keystream is defined on the state projection to match the Haskell keystream:
 
 ```lean
-def advance (n : Nat) (s : UInt64) : UInt64 := iter (fun s => (nextSeed s).2) n s
+def advance (n : Nat) (s : UInt64) : UInt64 := iter (fun s => (next_seed s).2) n s
 ```
 
 which is exactly the Lean rendering of the Haskell `iterate (fst . nextSeed) s`
@@ -140,13 +140,13 @@ in Lean by structural induction, needing no corpus.
 
 | Concept | Haskell (`Rechaos.Core.Scheduler`) | Lean (`Rechaos.Scheduler`) |
 |---|---|---|
-| Target predicate | `matches :: Target -> Event -> Bool` | `matchesTarget (tgt : Target) (evt : Event) : Bool` |
-| Probability gate | `draw \`mod\` ppmDenominator < chancePpm` (in `step`) | `fires (chancePpm : Nat) (draw : UInt64) : Bool` |
-| First-match selection | `choose` (nested in `step`) | `choose (rules : List Rule) (draw : UInt64) (evt : Event) : Option Fault` |
-| One decision | `step :: [Rule] -> Word64 -> Event -> (Word64, Decision)` | `step (rules) (state : UInt64) (evt : Event) : UInt64 × Decision` |
-| Whole trace | `schedule :: Policy -> [Event] -> Timeline` | `schedule (policy : Policy) (events : List Event) : Timeline` |
+| Target predicate | `matches :: Target -> Event -> Bool` | `matches_target (tgt : Target) (evt : Event) : Bool` |
+| Probability gate | `draw \`mod\` ppmDenominator < chancePpm` (in `step`) | `fires (chance_ppm : Nat) (draw : UInt64) : Bool` |
+| First-match selection | `choose` (nested in `step`) | `choose (rules : List rule) (draw : UInt64) (evt : Event) : Option Fault` |
+| One decision | `step :: [Rule] -> Word64 -> Event -> (Word64, Decision)` | `step (rules) (state : UInt64) (evt : Event) : UInt64 × decision` |
+| Whole trace | `schedule :: Policy -> [Event] -> Timeline` | `schedule (policy : policy) (events : List Event) : timeline` |
 
-`matches` is a reserved keyword in Lean, so the port names it `matchesTarget`; the
+`matches` is a reserved keyword in Lean, so the port names it `matches_target`; the
 behaviour is identical. The draw is the SplitMix64 *output* half — Haskell `snd`,
 Lean `.1` — and the seed advances by the *state* half (`fst` / `.2`) exactly once
 per event, whether or not any rule matched.
@@ -169,7 +169,7 @@ These are in `lean/Rechaos/Scheduler.lean`, proved by structural induction with 
     event": if the head matches, swapping the entire tail leaves the decision
     unchanged. This rules out accidental fallthrough to a lower-priority rule.
 - **gate endpoints** — `fires_zero_never` (0 ppm never fires, any draw) and
-  `fires_full_always` (`ppmDenominator` ppm always fires, any draw), both abstract
+  `fires_full_always` (`ppm_denominator` ppm always fires, any draw), both abstract
   over the draw.
 - **step / schedule structure** — `step_advances_once` (one state-advance per
   event, regardless of match), `step_preserves_event`, `step_injection_eq_choose`,
@@ -186,14 +186,14 @@ two corpora, each as a JSON golden *and* as Lean terms in
 - **probability gate** — `test/golden/gate.jsonl` rows `[seed, chancePpm, fires?]`
   over every keystream seed × a ppm ladder that straddles the midpoint (so the
   strict `<` is exercised on both sides). The Lean theorem
-  `fires_conforms_on_gateScope` checks, by `native_decide`, that
-  `fires chancePpm (nextSeed seed).1` reproduces the reference `fires?` on every
+  `fires_conforms_on_gate_scope` checks, by `native_decide`, that
+  `fires chance_ppm (next_seed seed).1` reproduces the reference `fires?` on every
   row. This is the subtle arithmetic differential.
 - **scheduler decisions** — `test/golden/decisions.jsonl`, a byte snapshot of the
   reference `schedule` over a scope of nine policies (empty, always/never, several
   first-match shadowing pairs, predicate-gated rules) against a six-event trace
   spanning both directions, occurrences, present/absent blobs and the elapsed-time
-  boundary. The Lean theorem `schedule_conforms_on_decisionScope` checks, by
+  boundary. The Lean theorem `schedule_conforms_on_decision_scope` checks, by
   `native_decide`, that the Lean `schedule` produces exactly the reference's
   injected-fault list for every case.
 
@@ -227,18 +227,18 @@ needing no corpus.
 
 | Concept | Haskell (`Rechaos.Core.Oracle`) | Lean (`Rechaos.Oracle`) |
 |---|---|---|
-| Output-tree node | `Entry = File Text Natural Bool \| Symlink Text \| Directory` | `Entry.file (contentHash) (sizeBytes) (executable) \| Entry.symlink (target) \| Entry.directory` |
-| Output tree | `type Tree = Map Text Entry` | `abbrev Tree := List (String × Entry)` (sorted by key) |
-| Per-path difference | `Change Text (Maybe Entry) (Maybe Entry)` | `structure Change { path, before, after }` |
-| Build outcome | `BuildResult = Built Tree \| BuildFailed Text \| BuildTimedOut` | `BuildResult.built \| .buildFailed \| .buildTimedOut` |
-| Verdict | `Verdict = Equivalent \| Diverged [Change] \| Inconclusive` | `Verdict.equivalent \| .diverged (changes) \| .inconclusive` |
-| Canonical difference | `diff :: Tree -> Tree -> [Change]` | `diff : Tree → Tree → List Change` |
+| Output-tree node | `Entry = File Text Natural Bool \| Symlink Text \| Directory` | `entry.file (contentHash) (sizeBytes) (executable) \| entry.symlink (target) \| entry.directory` |
+| Output tree | `type Tree = Map Text Entry` | `abbrev tree := List (String × entry)` (sorted by key) |
+| Per-path difference | `Change Text (Maybe Entry) (Maybe Entry)` | `structure change { path, before, after }` |
+| Build outcome | `BuildResult = Built Tree \| BuildFailed Text \| BuildTimedOut` | `build_result.built \| .buildFailed \| .buildTimedOut` |
+| Verdict | `Verdict = Equivalent \| Diverged [Change] \| Inconclusive` | `verdict.equivalent \| .diverged (changes) \| .inconclusive` |
+| Canonical difference | `diff :: Tree -> Tree -> [Change]` | `diff : tree → tree → List change` |
 | Null-diff equivalence | `equivalent a b = null (diff a b)` | `equivalent a b := diff a b == []` |
-| Build verdict | `compareBuilds :: BuildResult -> BuildResult -> Verdict` | `compareBuilds : BuildResult → BuildResult → Verdict` |
+| Build verdict | `compareBuilds :: BuildResult -> BuildResult -> Verdict` | `compare_builds : build_result → build_result → verdict` |
 
 The Haskell `Tree` is a `Data.Map Text Entry` whose `diff` iterates the union of
 both trees' keys in ascending order (`S.toAscList (keysSet a ∪ keysSet b)`). The
-Lean `Tree` is a `List (String × Entry)` kept in ascending key order, and the Lean
+Lean `tree` is a `List (String × entry)` kept in ascending key order, and the Lean
 `diff` is the matching key-ordered merge: on equal keys it compares entries, and on
 unequal keys it emits the lesser-keyed side first. Over a sorted assoc list this
 produces exactly the reference's canonical, ascending, one-`Change`-per-path output.
@@ -259,7 +259,7 @@ genuine **equivalence relation** together with the empty-diff criterion:
 - `diff_nil_imp_eq` — the structural crux: a null diff forces the two argument
   lists to coincide (the merge returns `[]` only when it consumed both inputs in
   lockstep on equal keys with equal entries). This needs no key-ordering lemmas,
-  only that each unequal-key branch emits a leading `Change`.
+  only that each unequal-key branch emits a leading `change`.
 - `equivalent_symm` — **symmetry**: `equivalent a b = equivalent b a`, routed
   entirely through `diff_nil_imp_eq` and `diff_self_nil` (no antisymmetry of the key
   order is required).
@@ -278,8 +278,8 @@ oracle corpus as a JSON golden *and* as Lean terms in
   symlink), empty-vs-nonempty, disjoint key sets, and multi-path diffs whose changes
   must land in ascending key order. Each row carries the reference `Verdict`
   (equivalence, or divergence with the full canonical change list). The Lean theorem
-  `compareBuilds_conforms_on_oracleScope` checks, by `native_decide`, that the Lean
-  `compareBuilds` reproduces exactly the reference verdict — change list and all —
+  `compare_builds_conforms_on_oracle_scope` checks, by `native_decide`, that the Lean
+  `compare_builds` reproduces exactly the reference verdict — change list and all —
   on every case.
 
 On the Haskell side, `CoreSpec.hs`'s golden-snapshot block re-derives the oracle
@@ -314,12 +314,12 @@ abstractly, needing no corpus.
 
 | Concept | Haskell (`Rechaos.Core.Minimize`) | Lean (`Rechaos.Minimize`) |
 |---|---|---|
-| Shell verdict | `Verdict = Triggers \| DoesNotTrigger \| Unknown` | `MinimizeVerdict.triggers \| .doesNotTrigger \| .unknown` |
-| Minimizer state | `ShrinkState { best :: Timeline, pending :: [Timeline] }` | `structure ShrinkState { best, pending }` |
-| Seed from a failure | `start :: Timeline -> ShrinkState` | `start : Timeline → ShrinkState` |
-| Next candidate | `candidate :: ShrinkState -> Maybe Timeline` | `candidate : ShrinkState → Option Timeline` |
-| Fold a verdict in | `observe :: Verdict -> ShrinkState -> ShrinkState` | `observe : MinimizeVerdict → ShrinkState → ShrinkState` |
-| Candidate set | `candidates :: Timeline -> [Timeline]` | `candidates : Timeline → List Timeline` |
+| Shell verdict | `Verdict = Triggers \| DoesNotTrigger \| Unknown` | `minimize_verdict.triggers \| .doesNotTrigger \| .unknown` |
+| Minimizer state | `ShrinkState { best :: Timeline, pending :: [Timeline] }` | `structure shrink_state { best, pending }` |
+| Seed from a failure | `start :: Timeline -> ShrinkState` | `start : timeline → shrink_state` |
+| Next candidate | `candidate :: ShrinkState -> Maybe Timeline` | `candidate : shrink_state → Option timeline` |
+| Fold a verdict in | `observe :: Verdict -> ShrinkState -> ShrinkState` | `observe : minimize_verdict → shrink_state → shrink_state` |
+| Candidate set | `candidates :: Timeline -> [Timeline]` | `candidates : timeline → List timeline` |
 | Strictly-weaker fault | `weaker :: Event -> Fault -> [Fault]` | `weaker : Event → Fault → List Fault` |
 
 `candidates` offers chunk deletions at halving sizes down to singletons (making a
@@ -327,7 +327,7 @@ converged result deletion-1-minimal for a deterministic predicate) plus intensit
 reductions that replace one injected fault with a strictly weaker one. The Lean
 port reproduces the reference `nub (deletions ++ intensities)` set exactly: the
 halving `descending` sweep and the `[0, k .. n-1]` stride are rendered as
-fuel-bounded structural recursions (`descending`, `strideOffsets`), and `weaker`
+fuel-bounded structural recursions (`descending`, `stride_offsets`), and `weaker`
 matches branch-for-branch — `delay` halves toward zero, `dribble` doubles its rate
 toward the full-speed cap `messageBytes * microsPerSecond`, `truncate` raises its
 kept-byte count toward the message size, and `abort` has no weaker form. `observe`
@@ -345,19 +345,19 @@ These are in `lean/Rechaos/Minimize.lean`, proved over core Lean (no Mathlib, no
   micros, bytes dropped below the message for `truncate`, rate below the cap for
   `dribble`). Proved by cases on the fault with each branch's numeric
   side-condition.
-- `summedIntensity_append` / `summedIntensity_singleton` — additivity of the
+- `summed_intensity_append` / `summed_intensity_singleton` — additivity of the
   summed-intensity measure over the `take ++ [replacement] ++ drop` splice the
   intensity candidates perform.
 - `deletion_length_lt` — a nonempty contiguous deletion strictly shrinks the
   length, hence the measure. Together with `weaker_severity_lt` this is
   **TERMINATION**: every generated candidate is strictly smaller than its input
   under the well-founded `(length, summed-intensity)` measure (`measure` /
-  `measureLt`), so the shrink loop terminates.
+  `measure_lt`), so the shrink loop terminates.
 - `observe_best_triggers` — **WITNESS PRESERVATION**: `observe` advances `best` to
   a new timeline only on a `triggers` verdict, and the new `best` is exactly the
   candidate the external checker reported `triggers` on. Given a truthful checker,
   every accepted `best` is a confirmed reproduction.
-- `observe_unknown_preserves_best` / `observe_unknown_eq_doesNotTrigger` — the
+- `observe_unknown_preserves_best` / `observe_unknown_eq_does_not_trigger` — the
   **conservative** half: an `unknown` verdict never advances `best` and is
   observationally identical to `doesNotTrigger`.
 
@@ -372,13 +372,13 @@ as a JSON golden *and* as Lean terms in
   every intensity-bearing constructor at interior and boundary (cap) values,
   `abort` (no weaker form), passthrough (`Nothing`) decisions, and multi-fault
   timelines. Each row carries the reference `candidates` set. The Lean theorem
-  `candidates_conforms_on_candidateScope` checks, by `native_decide`, that the Lean
+  `candidates_conforms_on_candidate_scope` checks, by `native_decide`, that the Lean
   `candidates` reproduces that set exactly on every case.
 - **acceptance trajectory** — `test/golden/minimize.jsonl` (second block), one row
   per `(timeline, threshold)` seed driven to convergence by `start`/`candidate`/
   `observe` under a deterministic oracle (a candidate triggers iff it retains a
   `delay` of at least `threshold` micros). Each row carries the converged `best`.
-  The Lean theorem `runShrink_conforms_on_trajectoryScope` ports the same
+  The Lean theorem `run_shrink_conforms_on_trajectory_scope` ports the same
   deterministic oracle and fuel-bounded driver and checks, by `native_decide`, that
   the Lean minimizer shrinks to exactly the reference `best`.
 
@@ -414,15 +414,15 @@ needing no corpus.
 
 | Concept | Haskell (`Rechaos.Core.Scheduler`) | Lean (`Rechaos.Replay`) |
 |---|---|---|
-| Indexed timeline | `Data.Map EventKey Decision` | `abbrev EventTable := List (EventKey × Decision)` (distinct keys) |
-| Build / validate | `validateTimeline :: Timeline -> Either Text (Map EventKey Decision)` | `validateTimeline : Timeline → Option EventTable` |
-| Single-event replay | `replayDecision :: Bool -> Map … -> Event -> Either Text Decision` | `replayDecision (sparse) (table) (evt) : ReplayOutcome` |
-| Replay outcome | `Either Text Decision` (`Left`=reject, `Right`=apply) | `ReplayOutcome.rejected \| .decided (decision)` |
-| Coverage check | `verifyReplay :: Timeline -> Timeline -> Either Text ()` | `verifyReplay (expected observed) : Bool` |
+| Indexed timeline | `Data.Map EventKey Decision` | `abbrev event_table := List (EventKey × decision)` (distinct keys) |
+| Build / validate | `validateTimeline :: Timeline -> Either Text (Map EventKey Decision)` | `validate_timeline : timeline → Option event_table` |
+| Single-event replay | `replayDecision :: Bool -> Map … -> Event -> Either Text Decision` | `replay_decision (sparse) (table) (evt) : replay_outcome` |
+| Replay outcome | `Either Text Decision` (`Left`=reject, `Right`=apply) | `replay_outcome.rejected \| .decided (decision)` |
+| Coverage check | `verifyReplay :: Timeline -> Timeline -> Either Text ()` | `verify_replay (expected observed) : Bool` |
 | Elapsed-agnostic equality | `sameEvent` (via `fingerprint`) | `sameEvent` (via `fingerprint`, in `Types.lean`) |
 
 The Haskell indexes a timeline with a `Data.Map`, whose insert guard rejects a
-repeated event identity; the Lean `validateTimeline` builds an association list and
+repeated event identity; the Lean `validate_timeline` builds an association list and
 rejects a repeated key with the matching `tableMember` guard, so it fails on exactly
 the same ill-formed timelines. Because both observable replay operations — key
 lookup and the coverage conjunction — are independent of association order once keys
@@ -444,29 +444,29 @@ faithful.
 These are in `lean/Rechaos/Replay.lean`, proved over core Lean (no Mathlib, no
 `UInt64` arithmetic) by structural induction over the table:
 
-- `validateTimeline_nodup` / `validateTimeline_key_agree` — the **validated-table
+- `validate_timeline_nodup` / `validate_timeline_key_agree` — the **validated-table
   invariants**: a validated table has distinct keys, and every binding is keyed by
   its own event's `eventKey`. Proved by threading each invariant through the
-  `validateTimeline.go` accumulator (the duplicate guard `tableMember` never inserts
+  `validate_timeline.go` accumulator (the duplicate guard `tableMember` never inserts
   a key already present). `lookup_of_mem_nodup` then shows that in a distinct-key
   table every binding looks itself up.
-- `verifyReplay_identity` — **REPLAY IDENTITY** (the prize): any timeline that
-  validates verifies against itself (`verifyReplay t t = true`). Replaying a
+- `verify_replay_identity` — **REPLAY IDENTITY** (the prize): any timeline that
+  validates verifies against itself (`verify_replay t t = true`). Replaying a
   recording against the very events it recorded always succeeds — every recorded
   event is observed, unchanged, with its recorded injection.
-  `replayDecision_recorded_identity` is the single-decision form (a recorded
-  decision replays to exactly itself), and `verifyReplay_schedule_identity`
+  `replay_decision_recorded_identity` is the single-decision form (a recorded
+  decision replays to exactly itself), and `verify_replay_schedule_identity`
   specializes the trace-level result to `schedule policy events`: when the scheduled
   timeline validates (its events carry distinct identities), replaying it against
   itself reproduces exactly those decisions. This is the round-trip that closes the
   determinism contract.
-- `replayDecision_rejects_changed_fingerprint` / `verifyReplay_changed_rejected` —
+- `replay_decision_rejects_changed_fingerprint` / `verify_replay_changed_rejected` —
   **FAIL-CLOSED**: a recorded event re-observed with a *different* payload
   fingerprint is rejected, both at the single-event level and through the
   trace-level coverage check. A changed recording is never silently accepted.
-  `replayDecision_reuses_recorded_injection` is the positive counterpart: a matching
+  `replay_decision_reuses_recorded_injection` is the positive counterpart: a matching
   fingerprint (even with a fresh arrival time) reuses the recorded injection.
-- `verifyReplay_missing_rejected` / `verifyReplay_empty_observed_rejected` —
+- `verify_replay_missing_rejected` / `verify_replay_empty_observed_rejected` —
   **COVERAGE**: a recorded event that never arrived rejects the replay — the general
   form (any recorded key absent from the observed table) and the sharp form (a
   nonempty recording replayed against an empty observed timeline).
@@ -484,16 +484,16 @@ and emits the replay corpus as a JSON golden *and* as Lean terms in
   case (coverage must **reject**), an extra observed pass-through (tolerated by the
   forward check), and a changed-injection case (must be **rejected**). Each row
   carries the reference `verifyReplay` verdict. The Lean theorem
-  `verifyReplay_conforms_on_replayScope` checks, by `native_decide`, that the Lean
-  `verifyReplay` reproduces every verdict.
+  `verify_replay_conforms_on_replay_scope` checks, by `native_decide`, that the Lean
+  `verify_replay` reproduces every verdict.
 - **per-event replay outcomes** — `test/golden/replay.jsonl` (second block), one row
   per `(sparse?, event)` probe of `replayDecision` against the recorded
   `replayExpected` table, under both the full and sparse semantics, over a recorded
   pass-through (new arrival time), a recorded injection (new arrival time), a changed
   fingerprint, and an unrecorded event. Each row carries the reference outcome
   (`rejected`, or `decided` with the reused injection). The Lean theorem
-  `replayDecision_conforms_on_replayProbeScope` checks, by `native_decide`, that the
-  Lean `replayDecision` reproduces every outcome — reusing the recorded injection on
+  `replay_decision_conforms_on_replay_probe_scope` checks, by `native_decide`, that the
+  Lean `replay_decision` reproduces every outcome — reusing the recorded injection on
   a matching fingerprint, failing closed on a changed one, and splitting the
   missing-event case by `sparse` (full rejects, sparse passes through).
 
@@ -541,7 +541,7 @@ the kernel, not by examples.
   (`lean/Rechaos/Oracle.lean`: `equivalent_refl` / `equivalent_symm` /
   `equivalent_trans` / `diff_nil_iff_equivalent`), and the concrete diff/verdict
   behaviour is pinned to the reference by the `native_decide` corpus
-  `compareBuilds_conforms_on_oracleScope` (see "The output-tree oracle layer"
+  `compare_builds_conforms_on_oracle_scope` (see "The output-tree oracle layer"
   above). The QuickCheck properties over `diff`/`compareBuilds` in `CoreSpec.hs`
   remain as an independent sampled check on the reference itself.
 - The minimizer's candidate generation and acceptance state machine are **now also
@@ -550,21 +550,21 @@ the kernel, not by examples.
   and witness preservation (`observe_best_triggers`, with the conservative
   `observe_unknown_*` lemmas) are proved abstractly, and the concrete candidate
   set + one shrink trajectory are pinned to the reference by the `native_decide`
-  corpora `candidates_conforms_on_candidateScope` and
-  `runShrink_conforms_on_trajectoryScope` (see "The minimizer layer" above). The
+  corpora `candidates_conforms_on_candidate_scope` and
+  `run_shrink_conforms_on_trajectory_scope` (see "The minimizer layer" above). The
   QuickCheck properties over `candidates`/`observe` in `CoreSpec.hs` (including
   deletion-1-minimality of a converged result) remain as an independent sampled
   check on the reference itself.
 - The replay checks — `validateTimeline` / `replayDecision` / `verifyReplay` — are
   **now also proved/pinned in Lean** (`lean/Rechaos/Replay.lean`): replay identity
-  (`verifyReplay_identity`, with `verifyReplay_schedule_identity` and the
-  single-decision `replayDecision_recorded_identity`), fail-closed
-  (`replayDecision_rejects_changed_fingerprint` / `verifyReplay_changed_rejected`),
-  and coverage (`verifyReplay_missing_rejected` /
-  `verifyReplay_empty_observed_rejected`) are proved abstractly, and the concrete
+  (`verify_replay_identity`, with `verify_replay_schedule_identity` and the
+  single-decision `replay_decision_recorded_identity`), fail-closed
+  (`replay_decision_rejects_changed_fingerprint` / `verify_replay_changed_rejected`),
+  and coverage (`verify_replay_missing_rejected` /
+  `verify_replay_empty_observed_rejected`) are proved abstractly, and the concrete
   verdicts + per-event outcomes are pinned to the reference by the `native_decide`
-  corpora `verifyReplay_conforms_on_replayScope` and
-  `replayDecision_conforms_on_replayProbeScope` (see "The replay layer" above). The
+  corpora `verify_replay_conforms_on_replay_scope` and
+  `replay_decision_conforms_on_replay_probe_scope` (see "The replay layer" above). The
   QuickCheck properties over replay's incomplete-vs-changed semantics in
   `CoreSpec.hs` remain as an independent sampled check on the reference itself.
 - Everything else outside the keystream: the status-code bijection, dribble pacing,
@@ -621,7 +621,7 @@ cd lean && lake build
 ```
 
 A successful run reports `Build completed successfully` and exits `0`. The project
-targets Lean 4.30, available in this repo's environment via:
+targets Lean 4.31, available in this repo's environment via:
 
 ```sh
 nix shell nixpkgs#lean4 --command lake build
