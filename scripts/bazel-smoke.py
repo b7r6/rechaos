@@ -10,7 +10,7 @@ import sys
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"test"))
-from integration import proxy, rule, READ
+from integration import binary, proxy, rule, READ
 
 parser=argparse.ArgumentParser()
 parser.add_argument("--host",required=True)
@@ -63,7 +63,7 @@ with proxy(opts.port,out/"chaos-proxy",[rule(READ,"response",{"kind":"truncate",
     summary["chaos"]=build("chaos",f"127.0.0.1:{port}",False)
 assert any(json.loads(line)["injection"] for line in timeline.read_text().splitlines()), "Bazel did not exercise the targeted Read"
 if summary["chaos"]["exitCode"]==0:
-    result=subprocess.run([str(ROOT/"bin/rechaos"),"oracle",str(out/"clean-output"),str(out/"chaos-output")],capture_output=True,text=True)
+    result=subprocess.run([binary(),"oracle",str(out/"clean-output"),str(out/"chaos-output")],capture_output=True,text=True)
     summary["oracle"]=json.loads(result.stdout)
 else:
     summary["oracle"]={"verdict":"inconclusive","reason":"Bazel rejected the faulted download; no successful chaos build output"}

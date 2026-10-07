@@ -76,6 +76,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from xml.sax.saxutils import escape
 
 # S3 operations we classify and can target.
 GET = "GET"
@@ -254,9 +255,9 @@ def s3_error_xml(code, message, resource):
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<Error>"
-        f"<Code>{code}</Code>"
-        f"<Message>{message}</Message>"
-        f"<Resource>{resource}</Resource>"
+        f"<Code>{escape(code)}</Code>"
+        f"<Message>{escape(message)}</Message>"
+        f"<Resource>{escape(resource)}</Resource>"
         "</Error>"
     ).encode("utf-8")
 

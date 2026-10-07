@@ -103,15 +103,18 @@ minimizeTimeline input output command signature repetitions timeoutSeconds maxTr
                 Just ("triggers" :: Text, Just found) | found == signature -> M.Triggers
                 Just ("does-not-trigger", _) -> M.DoesNotTrigger
                 _ -> M.Unknown
-        loop n state
-          | n >= maxTrials = pure (False, state)
-          | otherwise = case M.candidate state of
-              Nothing -> pure (True, state)
-              Just ds -> test ds >>= \v -> loop (n + 1) (M.observe v state)
+        loop n uncertain state = case M.candidate state of
+          Nothing -> pure (if uncertain then "inconclusive" else "complete", state)
+          Just ds
+            | n >= maxTrials -> pure ("trial-limit", state)
+            | otherwise -> do
+                v <- test ds
+                let uncertain' = v /= M.Triggers && (uncertain || v == M.Unknown)
+                loop (n + 1) uncertain' (M.observe v state)
     baseline <- test original
     unless (baseline == M.Triggers) $
       fail "initial timeline did not repeatedly reproduce the requested signature"
-    (finished, state) <- loop 0 (M.start original)
+    (status, state) <- loop 0 False (M.start original)
     final <- test (M.best state)
     unless (final == M.Triggers) $ fail "final witness did not reproduce; no minimized output written"
     writeTimeline output (M.best state)
@@ -119,7 +122,7 @@ minimizeTimeline input output command signature repetitions timeoutSeconds maxTr
     L.putStrLn
       ( encode
           ( object
-              [ "status" .= (if finished then "complete" else "trial-limit" :: Text)
+              [ "status" .= (status :: Text)
               , "faults" .= length (M.best state)
               , "checkerRuns" .= attempts
               , "signature" .= signature

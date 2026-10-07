@@ -78,6 +78,7 @@ import dataclasses
 import hashlib
 import itertools
 import json
+import math
 import pathlib
 import sys
 import threading
@@ -101,6 +102,8 @@ ERROR = "error"           # op failed with a transport/server error (inconclusiv
 # MISSING is represented in the register-value domain by this sentinel so the
 # linearization can treat "the register currently holds nothing" uniformly.
 EMPTY = "∅"          # the empty set symbol; never a real value hash
+EMPTY_HASH = hashlib.sha256(b"").hexdigest()
+EMPTY_KEY = f"sha256:{EMPTY_HASH}/0"
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +128,28 @@ class Event:
     size: Optional[int] = None
     worker: Optional[str] = None
     seq: int = 0                # stable insertion order, tie-breaks equal stamps
+
+    def __post_init__(self):
+        outcomes = {WRITE: {OK, ERROR}, READ: {OK, MISSING, ERROR},
+                    FIND_MISSING: {PRESENT, ABSENT, ERROR}, EVICT: {OK}}
+        if self.op not in outcomes or self.outcome not in outcomes[self.op]:
+            raise ValueError(f"invalid operation/outcome: {self.op}/{self.outcome}")
+        if not isinstance(self.key, str) or not self.key:
+            raise ValueError("history key must be a nonempty string")
+        if self.key.startswith("sha256:"):
+            hash_part, slash, size_part = self.key[7:].partition("/")
+            if (len(hash_part) != 64 or any(c not in "0123456789abcdef" for c in hash_part)
+                    or not slash or not size_part.isascii() or not size_part.isdigit()):
+                raise ValueError("CAS key must be sha256:LOWERCASE_HEX/SIZE")
+        if not all(math.isfinite(t) for t in (self.inv, self.res)) or self.inv > self.res:
+            raise ValueError("history timestamps must be finite with inv <= res")
+        if self.op == EVICT and self.inv != self.res:
+            raise ValueError("eviction must be an instant")
+        if self.size is not None and (type(self.size) is not int or self.size < 0):
+            raise ValueError("size must be a nonnegative integer")
+        if self.op in (READ, WRITE) and self.outcome == OK and (
+                not isinstance(self.value, str) or not self.value or self.value == EMPTY):
+            raise ValueError("successful reads and writes require a value_hash")
 
     # ---- serialization -------------------------------------------------- #
     def to_json(self) -> dict:
@@ -263,6 +288,8 @@ class Oracle:
         AC keys (which do not encode their value) are simply skipped by C1.
         """
         evs = self.events()
+        if any(e.op == WRITE and e.outcome == ERROR for e in evs):
+            raise ValueError("unresolved failed writes may have committed; resolve their outcomes before checking")
         violations: List[Violation] = []
         violations += check_content_addressing(evs, key_legal_value)
         by_key: Dict[str, List[Event]] = {}
@@ -333,6 +360,15 @@ def check_content_addressing(events: List[Event],
             legal = _legal_value_for_key(ev.key)
         if legal is None:
             continue  # not content-addressed; C1 N/A
+        if ev.outcome == OK and ev.size is not None and ev.key.startswith("sha256:"):
+            try:
+                expected_size = int(ev.key.split("/", 1)[1])
+            except (ValueError, IndexError):
+                raise ValueError(f"invalid CAS key: {ev.key}") from None
+            if ev.size != expected_size:
+                out.append(Violation("content-addressing", ev.key,
+                                     f"reported size {ev.size} differs from digest size {expected_size}",
+                                     [ev.to_json()]))
         if ev.op == READ and ev.outcome == OK:
             if ev.value != legal:
                 out.append(Violation(
@@ -356,9 +392,10 @@ def check_content_addressing(events: List[Event],
 def check_monotone_availability(key: str, events: List[Event]) -> List[Violation]:
     """C2: once a write completes, later-starting ops must observe K present.
 
-    Formally: let t* be the response time of the first completed (ok) write of K.
-    For any op O with O.inv > t* and no modelled eviction E with t* <= E <= O.inv,
-    O must observe K present:
+    For a completed write W and observation O with W.res < O.inv, presence
+    is forced if no eviction overlaps W or occurs before O completes. An
+    eviction after O starts may explain an absent result. A subsequent write
+    restores the obligation. O must then observe K present:
         read  -> outcome != missing
         find_missing -> outcome != absent
     A violation is a read-after-write that sees the key vanish with no eviction to
@@ -368,8 +405,6 @@ def check_monotone_availability(key: str, events: List[Event]) -> List[Violation
     writes = [e for e in events if e.op == WRITE and e.outcome == OK]
     if not writes:
         return out
-    first_write = min(writes, key=lambda e: (e.res, e.seq))
-    first_write_res = first_write.res
     evictions = sorted(e.inv for e in events if e.op == EVICT)
     for ev in events:
         if ev.op == READ and ev.outcome == MISSING:
@@ -380,16 +415,18 @@ def check_monotone_availability(key: str, events: List[Event]) -> List[Violation
             observed_absent = False
         if not observed_absent:
             continue
-        if ev.inv <= first_write_res:
-            continue  # began before any write completed -> may legitimately miss
-        # Is there an eviction in (first completed write .. this op begins)?
-        if any(first_write_res <= t <= ev.inv for t in evictions):
+        # An eviction can linearize during the write or the observation. Only a
+        # completed write with no such eviction forces this observation present.
+        forcing = [w for w in writes if w.res < ev.inv
+                   and not any(w.inv <= t <= ev.res for t in evictions)]
+        if not forcing:
             continue
+        witness = max(forcing, key=lambda e: (e.res, e.seq))
         out.append(Violation(
             "monotone-availability", key,
             f"op began at inv={ev.inv} observed key ABSENT, but a write "
-            f"completed at res={first_write_res} with no modelled eviction since",
-            [first_write.to_json(), ev.to_json()]))
+            f"completed at res={witness.res} with no overlapping or subsequent modelled eviction",
+            [witness.to_json(), ev.to_json()]))
     return out
 
 
@@ -412,9 +449,9 @@ def check_linearizability(key: str, events: List[Event]) -> List[Violation]:
 
     We model each key as a single mutable register whose legal operations are
     write(v) and read -> v (with EMPTY meaning "not present / never written").
-    find_missing and evict are not value operations; evict is modelled as an
-    implicit write(EMPTY) at its instant (it makes the register empty), while
-    find_missing is left to C2.
+    An eviction is an implicit write(EMPTY) at its instant. find_missing checks
+    presence at its own linearization point. The empty CAS blob starts present
+    and cannot be evicted. Other keys must start empty or include setup writes.
 
     A history is linearizable iff there is a permutation of its operations that
     (a) respects real-time order -- if a.res < b.inv then a precedes b -- and
@@ -433,72 +470,48 @@ def check_linearizability(key: str, events: List[Event]) -> List[Violation]:
     for ev in events:
         if ev.op == WRITE and ev.outcome == OK:
             ops.append(_LinearOp(WRITE, ev.value, ev.inv, ev.res, ev))
-        elif ev.op == EVICT:
+        elif ev.op == EVICT and key != EMPTY_KEY:
             ops.append(_LinearOp(WRITE, EMPTY, ev.inv, ev.res, ev))
         elif ev.op == READ and ev.outcome in (OK, MISSING):
             val = ev.value if ev.outcome == OK else EMPTY
             ops.append(_LinearOp(READ, val, ev.inv, ev.res, ev))
-        # errors and find_missing do not constrain the register value
+        elif ev.op == FIND_MISSING and ev.outcome in (PRESENT, ABSENT):
+            ops.append(_LinearOp(FIND_MISSING, ev.outcome, ev.inv, ev.res, ev))
+        # Failed reads do not constrain the register value.
     if not ops:
         return []
 
     # Stable order for determinism and for the "minimal" test.
     ops.sort(key=lambda o: (o.inv, o.res, o.ev.seq))
     n = len(ops)
-    used = [False] * n
-
-    def minimal_candidates() -> List[int]:
-        """Indices of pending ops that are not forced to come after another pending op.
-
-        A pending op i may be linearized next iff no other pending op j ends
-        strictly before i begins (j.res < i.inv); if such a j exists, real-time
-        order forces j before i, so i cannot be first among the pending set.
-        """
-        cands = []
-        for i in range(n):
-            if used[i]:
-                continue
-            blocked = False
-            for j in range(n):
-                if used[j] or j == i:
-                    continue
-                if ops[j].res < ops[i].inv:
-                    blocked = True
-                    break
-            if blocked:
-                continue
-            cands.append(i)
-        return cands
-
-    # DFS with memoization on (frozenset pending, register_val) to avoid blowups.
+    predecessors = [sum(1 << j for j, other in enumerate(ops)
+                        if j != i and other.res < op.inv)
+                    for i, op in enumerate(ops)]
+    # Iterative search avoids Python's recursion limit on sequential histories.
+    # Each edge removes one operation, so revisiting a state adds no witnesses.
     seen = set()
-
-    def search(register_val) -> bool:
-        remaining = tuple(i for i in range(n) if not used[i])
-        if not remaining:
-            return True
-        memo_key = (remaining, register_val)
-        if memo_key in seen:
-            return False
-        for i in minimal_candidates():
+    stack = [((1 << n) - 1, EMPTY_HASH if key == EMPTY_KEY else EMPTY)]
+    while stack:
+        remaining, register_val = stack.pop()
+        if remaining == 0:
+            return []
+        state = (remaining, register_val)
+        if state in seen:
+            continue
+        seen.add(state)
+        for i in range(n - 1, -1, -1):
+            bit = 1 << i
+            if not remaining & bit or predecessors[i] & remaining:
+                continue
             op = ops[i]
-            if op.kind == READ:
-                if op.value != register_val:
+            if op.kind in (READ, FIND_MISSING):
+                legal = (op.value == register_val if op.kind == READ else
+                         (register_val != EMPTY) == (op.value == PRESENT))
+                if not legal:
                     continue
-                used[i] = True
-                if search(register_val):
-                    return True
-                used[i] = False
+                stack.append((remaining ^ bit, register_val))
             else:  # WRITE / evict
-                used[i] = True
-                if search(op.value):
-                    return True
-                used[i] = False
-        seen.add(memo_key)
-        return False
-
-    if search(EMPTY):
-        return []
+                stack.append((remaining ^ bit, op.value))
 
     # Not linearizable: build an explanatory witness.
     witness = _diagnose_nonlinearizable(key, ops)
@@ -870,7 +883,11 @@ def main(argv=None) -> int:
     if argv == ["--self-test"]:
         argv = ["self-test"]
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, KeyError, TypeError, OSError) as error:
+        print(f"consistency oracle: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
