@@ -1,0 +1,222 @@
+% ---------------------------------------------------------------------------
+% rechaos paper bibliography.
+% Entries marked [VERIFIED] were confirmed (authors/title/venue/year) by the
+% adversarial deep-research pass. Entries marked [CANONICAL] are widely cited
+% foundational works included on the author's confidence; re-verify before
+% camera-ready. Entries marked [CHECK] carry a known venue/URL discrepancy
+% flagged during verification.
+% ---------------------------------------------------------------------------
+
+% --- Delta debugging lineage ------------------------------------------------
+
+@article{zeller2002ddmin,
+  author  = {Andreas Zeller and Ralf Hildebrandt},
+  title   = {Simplifying and Isolating Failure-Inducing Input},
+  journal = {IEEE Transactions on Software Engineering},
+  volume  = {28},
+  number  = {2},
+  pages   = {183--200},
+  year    = {2002},
+  doi     = {10.1109/32.988498},
+  note    = {[VERIFIED] ddmin; 1-minimality is a local, not global, optimum.}
+}
+
+@inproceedings{zeller1999yesterday,
+  author    = {Andreas Zeller},
+  title     = {Yesterday, My Program Worked. Today, It Does Not. Why?},
+  booktitle = {Proc.\ 7th European Software Engineering Conference / 7th ACM
+               SIGSOFT Symp.\ on Foundations of Software Engineering (ESEC/FSE)},
+  pages     = {253--267},
+  year      = {1999},
+  doi       = {10.1145/318773.318946},
+  note      = {[CANONICAL] origin of delta debugging.}
+}
+
+@inproceedings{vince2022iterating,
+  author    = {D\'{a}niel Vince},
+  title     = {Iterating the Minimizing Delta Debugging Algorithm},
+  booktitle = {Proc.\ 13th Int.\ Workshop on Automating Test Case Design,
+               Selection and Evaluation (A-TEST)},
+  year      = {2022},
+  doi       = {10.1145/3548659.3561314},
+  note      = {[VERIFIED] DDMIN*: re-run ddmin to a fixpoint to escape the
+               first local optimum.}
+}
+
+% --- Hierarchical / grammar-aware reduction ---------------------------------
+
+@inproceedings{misherghi2006hdd,
+  author    = {Ghassan Misherghi and Zhendong Su},
+  title     = {{HDD}: Hierarchical Delta Debugging},
+  booktitle = {Proc.\ 28th Int.\ Conference on Software Engineering (ICSE)},
+  pages     = {142--151},
+  year      = {2006},
+  doi       = {10.1145/1134285.1134307},
+  note      = {[VERIFIED] level-by-level ddmin over a parse tree.}
+}
+
+@inproceedings{sun2018perses,
+  author    = {Chengnian Sun and Yuanbo Li and Qirun Zhang and Tianxiao Gu
+               and Zhendong Su},
+  title     = {Perses: Syntax-Guided Program Reduction},
+  booktitle = {Proc.\ 40th Int.\ Conference on Software Engineering (ICSE)},
+  pages     = {361--371},
+  year      = {2018},
+  doi       = {10.1145/3180155.3180236},
+  note      = {[VERIFIED] grammar-guided; every candidate syntactically valid.}
+}
+
+@inproceedings{regehr2012creduce,
+  author    = {John Regehr and Yang Chen and Pascal Cuoq and Eric Eide
+               and Chucky Ellison and Xuejun Yang},
+  title     = {Test-Case Reduction for {C} Compiler Bugs},
+  booktitle = {Proc.\ 33rd ACM SIGPLAN Conference on Programming Language
+               Design and Implementation (PLDI)},
+  pages     = {335--346},
+  year      = {2012},
+  doi       = {10.1145/2254064.2254104},
+  note      = {[CANONICAL] C-Reduce; pipeline of transformation passes.}
+}
+
+@inproceedings{vince2021hoisting,
+  author    = {D\'{a}niel Vince and Ren\'{a}ta Hodov\'{a}n and Daniella B\'{a}rsony
+               and \'{A}kos Kiss},
+  title     = {The {ERATO} Generative Approach and Hoisting for Hierarchical
+               Delta Debugging},
+  booktitle = {Proc.\ IEEE/ACM Int.\ Conference on Automation of Software Test
+               (AST)},
+  year      = {2021},
+  eprint    = {2104.03637},
+  archivePrefix = {arXiv},
+  note      = {[VERIFIED] hoisting: replace a subtree with a same-category
+               subtree; up to 80\% smaller than baseline HDD (best case).}
+}
+
+@article{vulcan2023,
+  author  = {Zhenyang Xu and Yongqiang Tian and Mengxiao Zhang and Gaosen Zhao
+             and Yu Jiang and Chengnian Sun},
+  title   = {Pushing the Limit of 1-Minimality of Language-Agnostic Program
+             Reduction},
+  journal = {Proc.\ ACM on Programming Languages (OOPSLA)},
+  volume  = {7},
+  year    = {2023},
+  doi     = {10.1145/3622855},
+  note    = {[CHECK] Vulcan; venue is OOPSLA 2023 (PACMPL vol.\ 7). A DOI found
+             during search resolved to an ASE-style record --- confirm before
+             camera-ready.}
+}
+
+% --- Property-based-testing shrinking ---------------------------------------
+
+@inproceedings{claessen2000quickcheck,
+  author    = {Koen Claessen and John Hughes},
+  title     = {QuickCheck: A Lightweight Tool for Random Testing of Haskell
+               Programs},
+  booktitle = {Proc.\ 5th ACM SIGPLAN Int.\ Conference on Functional
+               Programming (ICFP)},
+  pages     = {268--279},
+  year      = {2000},
+  doi       = {10.1145/351240.351266},
+  note      = {[CANONICAL] type-directed shrinking; non-compositional under
+               monadic bind.}
+}
+
+@inproceedings{maciver2020hypothesis,
+  author    = {David R. MacIver and Alastair F. Donaldson},
+  title     = {Test-Case Reduction via Test-Case Generation: Insights From the
+               {Hypothesis} Reducer},
+  booktitle = {Proc.\ 34th European Conference on Object-Oriented Programming
+               (ECOOP)},
+  series    = {LIPIcs},
+  volume    = {166},
+  pages     = {13:1--13:27},
+  year      = {2020},
+  doi       = {10.4230/LIPIcs.ECOOP.2020.13},
+  note      = {[VERIFIED] internal/choice-sequence reduction; shortlex objective;
+               valid-by-construction, generator-agnostic.}
+}
+
+@misc{hedgehog,
+  author       = {Jacob Stanley},
+  title        = {Hedgehog: Property-Based Testing with Integrated Shrinking},
+  howpublished = {\url{https://hedgehog.qa/}},
+  note         = {[CANONICAL] integrated shrinking via rose trees.}
+}
+
+@misc{etna2026shrinking,
+  author       = {Jessica Shi and others},
+  title        = {Evaluating Shrinking (ETNA)},
+  howpublished = {arXiv:2608.09935},
+  year         = {2026},
+  note         = {[VERIFIED, preprint] structural shrinking usually faster;
+                  no technique dominates; generator family and workload
+                  dominate outcomes. Peer-review status unconfirmed.}
+}
+
+% --- Group testing / probabilistic query selection --------------------------
+
+@inproceedings{wang2021probdd,
+  author    = {Guancheng Wang and Ruobing Shen and Junjie Chen and Yingfei Xiong
+               and Lu Zhang},
+  title     = {Probabilistic Delta Debugging},
+  booktitle = {Proc.\ 29th ACM Joint European Software Engineering Conference
+               and Symp.\ on the Foundations of Software Engineering (ESEC/FSE)},
+  year      = {2021},
+  doi       = {10.1145/3468264.3468625},
+  note      = {[VERIFIED] sequential Bayesian experimental design; ACM SIGSOFT
+               Distinguished Paper. Trades the 1-minimality guarantee for speed.}
+}
+
+@article{aldridge2019grouptesting,
+  author  = {Matthew Aldridge and Oliver Johnson and Jonathan Scarlett},
+  title   = {Group Testing: An Information Theory Perspective},
+  journal = {Foundations and Trends in Communications and Information Theory},
+  volume  = {15},
+  number  = {3--4},
+  pages   = {196--392},
+  year    = {2019},
+  doi     = {10.1561/0100000099},
+  note    = {[VERIFIED] algorithm-independent converse bounds on test count.}
+}
+
+@article{dorfman1943,
+  author  = {Robert Dorfman},
+  title   = {The Detection of Defective Members of Large Populations},
+  journal = {The Annals of Mathematical Statistics},
+  volume  = {14},
+  number  = {4},
+  pages   = {436--440},
+  year    = {1943},
+  doi     = {10.1214/aoms/1177731363},
+  note    = {[CANONICAL] origin of group testing.}
+}
+
+% --- Formal methods ---------------------------------------------------------
+
+@article{paraskevopoulou2021certicoq,
+  author  = {Zoe Paraskevopoulou and John M. Li and Andrew W. Appel},
+  title   = {Compositional Optimizations for {CertiCoq}},
+  journal = {Proc.\ ACM on Programming Languages (ICFP)},
+  volume  = {5},
+  year    = {2021},
+  doi     = {10.1145/3473591},
+  note    = {[VERIFIED, thematic] Coq-mechanized semantics-preserving compiler
+             optimization; NOT a verified test-case reducer.}
+}
+
+@misc{leanprover,
+  author       = {Leonardo de Moura and Sebastian Ullrich},
+  title        = {The {Lean 4} Theorem Prover and Programming Language},
+  howpublished = {CADE 28},
+  year         = {2021},
+  doi          = {10.1007/978-3-030-79876-5_37}
+}
+
+% --- Context: remote execution ----------------------------------------------
+
+@misc{reapi,
+  author       = {{Bazel Authors}},
+  title        = {Remote Execution {API} (REAPI)},
+  howpublished = {\url{https://github.com/bazelbuild/remote-apis}},
+  note         = {Protocol under test.}
+}
