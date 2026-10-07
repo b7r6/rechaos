@@ -10,10 +10,10 @@ generator:
    novelty-seeking bias that steers the generator toward combinations that keep
    producing *new* observable behavior.
 2. **Resource-leak soak** (`--soak`) — a generalized rising-floor detector that
-   tracks every scrapable numeric signal over a long run and flags any that grow
-   without bound.
+   tracks numeric signals over a long run and flags sustained growth patterns. A finite rising trend is a leak candidate,
+   not a proof of unbounded growth.
 
-Both are fully reproducible under `--seed`, both are additive (every existing
+Both use seeded selection, and both are additive (every existing
 mode, flag, and invariant is unchanged), and neither touches server
 configuration — the tool only ever speaks REAPI and scrapes the Prometheus
 `/metrics` endpoint.
@@ -73,11 +73,13 @@ Selection is epsilon-greedy with an optimistic prior:
 - with probability `--explore-floor` (default `0.25`) the choice is **uniform
   random** — a permanent exploration floor so nothing is ever starved;
 - otherwise the choice is sampled proportional to `reward + prior`, where a
-  never-tried option gets an optimistic `+1.0` prior so everything is tried once
-  before exploitation begins, and a small `+0.05` keeps all weights positive.
+  never-tried option gets an optimistic `+1.0` prior to increase exploration, and a small `+0.05` keeps all weights positive. This
+is a sampling bias, not a guarantee that each choice is tried before reuse.
 
-Because every draw comes from a single seeded RNG (`Random("<seed>:feedback")`)
-and never from global state, a given `--seed` replays the campaign identically.
+The RNG (`Random("<seed>:feedback")`) is seeded, but rewards depend on observed
+responses and metrics. Identical seeds reproduce choices only with identical
+feedback histories. Preserve policies, timelines, and observations for replay;
+a seed alone does not reproduce an adaptive campaign or a soak verdict.
 
 With `--no-feedback` the `Feedback.choose` path degenerates to a plain
 `rng.choice`, so the tool reproduces the original uniform-random behavior exactly

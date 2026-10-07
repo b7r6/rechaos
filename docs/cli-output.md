@@ -97,8 +97,11 @@ The `clean` / `chaos` strings are the `Show` rendering of the pure `Entry` type
 {"verdict": "inconclusive"}
 ```
 
-At least one side was not a successful build, so no divergence claim can be made.
-Exit code `2`.
+The CLI could not snapshot at least one directory (missing, unreadable, changed
+during traversal, or unsupported node); the reason goes to stderr. Exit code
+`2`. The CLI assumes the caller supplies outputs from successful completed
+builds. The library additionally produces this verdict for failed/timed-out
+`BuildResult` values.
 
 | Verdict | Exit code |
 |---|---|
@@ -127,7 +130,7 @@ when the search finishes and the final witness is confirmed:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `status` | string | `"complete"` when the delta-debugger converged; `"trial-limit"` when it hit `--max-trials` first. |
+| `status` | string | `"complete"` after exhausting candidates conclusively; `"inconclusive"` if an unresolved checker outcome remains for the final witness; `"trial-limit"` when it hit `--max-trials` before exhausting candidates. |
 | `faults` | number | Count of firing faults in the minimized witness written to `--output`. |
 | `checkerRuns` | number | Total number of checker subprocess invocations across all trials. |
 | `signature` | string | The exact failure signature that every retained trial preserved (the `--signature` argument). |
@@ -135,7 +138,10 @@ when the search finishes and the final witness is confirmed:
 The minimized timeline itself is written to the `--output` path; a per-trial
 evidence log is written to `<output>.trials.jsonl`. If the baseline or the final
 witness fails to reproduce the signature, `minimize` fails on stderr with a
-non-zero exit and writes no summary object.
+non-zero exit and writes no summary object. `inconclusive` and `trial-limit`
+still write a repeatedly confirmed witness and exit 0; callers requiring
+minimality must require `status == "complete"`. The limit counts candidate
+trials; baseline and final confirmation runs are additional.
 
 | Command | Exit codes |
 |---|---|

@@ -36,9 +36,9 @@ JSON instead of the exit code.
 ### Determinism
 
 Blob contents are a pure function of `(--seed, label)` via SHAKE-256 and the
-probe order is fixed, so two runs against the same server produce the same
-checks in the same order and byte-identical JSON apart from the `generatedAt`
-timestamp. Only observed server behaviour varies between runs.
+probe order is fixed. Responses and dependent checks can still vary with server
+state, scheduling, eviction, and transport errors, so the report is not guaranteed
+byte-identical across runs. Preserve the observations as evidence.
 
 ## What is probed
 
@@ -49,7 +49,7 @@ Each probe produces one or more **checks**. A check has a stable `id`, a
 
 | Status | Meaning | Counts toward grade? |
 | --- | --- | --- |
-| `PASS` | The server implements the behaviour and it is spec-correct. | Yes (numerator + denominator) |
+| `PASS` | The probe observed the expected behavior for its tested case. | Yes (numerator + denominator) |
 | `FAIL` | The server implements the method but violates the spec. | Yes (denominator only) |
 | `UNSUPPORTED` | The method is not implemented here (UNIMPLEMENTED / HTTP/2 404). | No |
 | `SKIP` | Could not be evaluated: a transport fault (UNAVAILABLE / DEADLINE_EXCEEDED), or a dependency check did not run. | No |
@@ -69,11 +69,11 @@ not lower the grade. A `FAIL` is reserved for a method that is present and wrong
 | Content-addressable storage | `digest.sha256` | SHA256 support — from the advertised set if Capabilities is present, otherwise inferred from the successful CAS round-trip. |
 | Content-addressable storage | `cas.fmb` | `FindMissingBlobs` reports exactly the absent blob and omits the present one. |
 | ByteStream semantics | `bs.committed` | The `committed_size` from `Write` matches the declared size and agrees with `QueryWriteStatus`. |
-| ByteStream semantics | `bs.qws` | `QueryWriteStatus` on a finished upload reports `complete` with an in-range committed size. |
+| ByteStream semantics | `bs.qws` | `QueryWriteStatus` on a finished upload reports `complete` with the exact committed size. A missing retained upload status is inconclusive. |
 | ByteStream semantics | `bs.range` | Range reads are correct across whole / prefix / suffix / interior / **at-EOF** / **limit-past-EOF** cases. A read at `read_offset == size` must succeed with zero bytes. |
 | ByteStream semantics | `bs.short` | A client that declares size N but finishes after fewer than N bytes is **rejected** (INVALID_ARGUMENT / FAILED_PRECONDITION / DATA_LOSS), never silently accepted. |
 | Content-addressing integrity | `integrity.write` | Bytes that do **not** hash to the declared digest are either rejected on write or at minimum never served back under the claimed digest. This is the core content-addressing guarantee. |
-| Action cache | `ac.update` | `UpdateActionResult` stores an `ActionResult`. UNSUPPORTED if the method is absent. |
+| Action cache | `ac.update` | After uploading the required Command and Action, `UpdateActionResult` returns an equivalent `ActionResult`. UNSUPPORTED if the method is absent. |
 | Action cache | `ac.get` | `GetActionResult` round-trips the stored `ActionResult`. |
 | Batch operations | `batch.update` | `BatchUpdateBlobs` stores several small blobs with per-entry OK status. |
 | Batch operations | `batch.read` | `BatchReadBlobs` round-trips those blobs. |
@@ -129,7 +129,8 @@ Two special cases:
 ## Inferred consistency level
 
 The scorecard reports a coarse, explainable consistency classification. This is
-**not** a linearizability proof — that is the job of
+**not** a linearizability proof. To check a finite recorded history against an
+explicit register model, use
 [`consistency_oracle.py`](consistency-oracle.md). It is a conservative mapping
 from observed guarantees to a level:
 
@@ -152,3 +153,8 @@ the classification is always auditable from the report itself.
 - **Not exhaustive.** The battery covers the high-value correctness surface
   (content addressing, ByteStream semantics, AC, batch, capability negotiation);
   it is intentionally small enough to run fast and reason about completely.
+
+The local contract suite exercises the full battery against a verifying fixture
+and includes regressions for unrelated corrupt readback bytes, transport errors
+that must remain inconclusive, and required Action/Command uploads. A graded
+PASS remains evidence for the specific checked fields and workload.

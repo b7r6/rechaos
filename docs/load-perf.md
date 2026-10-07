@@ -31,19 +31,23 @@ Blob sizes are drawn from a distribution between `--size-min` and `--size-max`:
 - `uniform` — uniform in raw bytes;
 - `fixed` — always `--size-min`.
 
-Writes generate a fresh, unique blob (random UUID prefix) so each upload is a
-distinct digest that genuinely exercises the write path. Reads draw from the
+Writes sample fresh payloads with random UUID bytes at the start. Tiny blobs
+can collide because their byte domain is small; they do not guarantee a cold
+cache entry for every upload. Reads draw from the
 pool of blobs written so far; before the pool is warm a read falls back to a
 write (and is counted as a write, so the mix stays honest).
 
 ## Determinism
 
-With a fixed `--seed`, the **workload plan** is fully reproducible: each worker
-`i` derives all of its decisions (which op, what blob size, which prior blob to
-read) from `random.Random(seed + i)`. The measured *latencies* are of course
-not deterministic — they are the quantity under test — but the *stimulus* is,
-which is exactly what a fair regression comparison needs. Use the same `--seed`,
-`--clients`, mix, and size distribution for the baseline and the comparison run.
+Each worker uses `random.Random(seed + i)` for operation and size draws. The
+full stimulus is not deterministic: blob bytes include fresh UUIDs, readers use
+a shared pool populated by successful writes, and thread scheduling determines
+which worker consumes the shared operation budget. Server failures also change
+pool contents and fallback writes.
+
+Use the same seed, client count, mix, and size distribution for statistically
+comparable runs, and inspect the observed operation counts. Exact workload
+replay is not provided by this load generator.
 
 Prefer `--op-count` (a fixed total number of measured ops across all clients)
 over `--duration` when you want the two runs to issue the *same amount of work*;

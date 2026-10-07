@@ -10,11 +10,10 @@ answers a complementary, vendor-grade question:
 
 It runs one deterministic probe battery against every configured endpoint,
 normalizes each response to an implementation-independent **observation**, and
-diffs the observations probe-by-probe. Where every endpoint agrees, the probe is
-conformant; where they disagree, the harness emits a structured **divergence
-witness**. That witness is exactly the artifact a vendor uses to demonstrate "we
-conform and competitor X diverges" — or that a client uses to decide whether two
-REAPI backends are drop-in interchangeable.
+diffs the observations probe-by-probe. Where every endpoint agrees, the recorded observations match; where they
+disagree, the harness emits a structured **divergence witness**. Agreement on
+this finite battery is evidence about those probes, not proof of conformance
+or interchangeability on other workloads.
 
 ## The model: observable equivalence
 
@@ -24,8 +23,10 @@ whole battery is equivalence on every probe.
 
 The power of the model is in the *normalization*: it deliberately discards
 implementation-private, non-semantic detail and keeps only what a REAPI
-**client** is entitled to rely on. A difference the spec does not constrain is
-not a divergence; a difference a client could observe and depend on **is**.
+**client** is entitled to rely on. The retained fields define the scope of comparison. Some differences, such as
+upload-status retention or cache eviction, can be permitted by the protocol.
+A divergence therefore needs interpretation against the workload and backend
+configuration before it is called a conformance defect.
 
 | RPC | Kept (semantic) | Discarded (private) |
 |---|---|---|
@@ -33,8 +34,8 @@ not a divergence; a difference a client could observe and depend on **is**.
 | `ByteStream.Read` (incl. ranges) | status; byte count; SHA-256 of returned bytes; whether bytes hash to the requested digest | latency; number/size of response messages |
 | `ByteStream.QueryWriteStatus` | status; committed size; `complete` flag | latency |
 | `CAS.FindMissingBlobs` | status; the **set** of missing digests (order-independent, canonicalized) | latency; response ordering |
-| `ActionCache.GetActionResult` | status (presence/absence); `exit_code`; the set of referenced output-file digests | latency; error wording; private metadata |
-| `ActionCache.UpdateActionResult` | status; `exit_code` | latency |
+| `ActionCache.GetActionResult` | status; exit code; output paths, digests, executable flags, directories and symlinks; stdout/stderr content identities | latency; error wording; execution metadata |
+| `ActionCache.UpdateActionResult` | same normalized result fields as GetActionResult | latency; execution metadata |
 
 Content-addressing (returned bytes must hash to the requested digest) is a hard
 REAPI contract, so the returned-bytes SHA-256 and the `matches` flag are first
@@ -43,7 +44,7 @@ correct read on another even if both report `OK`.
 
 ### Determinism
 
-Everything the harness touches is a pure function of `--seed`:
+Generated requests depend on `--seed`, `--sizes`, `--instance`, and `--run-id`:
 
 - **Blob contents** are `shake_256(seed/run_id/label)` (via the shared `Blob`
   helper), so the same seed produces the same bytes, the same digests, and the
@@ -51,9 +52,12 @@ Everything the harness touches is a pure function of `--seed`:
 - **Action Cache action digests** are derived from each blob's digest.
 - **Probe order** is fixed and seed-independent.
 
-Consequently two runs against the same fleet produce identical observations and
-therefore an identical verdict, and any divergence is **reproducible** from the
-seed alone — paste the seed into a bug report and the counter-example regrows.
+These inputs reconstruct the probe workload, including valid Command/Action
+blobs uploaded before AC updates. They do not determine responses: cache state,
+eviction, concurrency, faults, and transport failures can change observations.
+Reports retain the effective `runId` with the seed, sizes, instance, and each
+observation. Reproducing a finding also requires the relevant backend state and
+traffic conditions; a seed alone is insufficient.
 
 ## What a divergence means
 
@@ -85,9 +89,11 @@ and leaves attribution to the reader.
 
 Agreement is **not** a proof of correctness: two endpoints can be wrong in the
 same way (both corrupt identically) and still agree. Differential testing finds
-*divergence*; pair it with the oracle and the chaos monkey for absolute
-correctness. This is why the self-check below — the same endpoint listed twice —
-must always report full agreement: it is the harness's own soundness test.
+*divergence*; pair it with the oracle and chaos monkey for invariant checks.
+The same endpoint listed twice creates two connections and performs each probe
+twice, retaining separately numbered observations. Agreement is expected on a
+stable endpoint, but changing state or nondeterminism can produce a divergence.
+It is a repeatability check, not a guarantee of agreement.
 
 ## Usage
 
@@ -134,7 +140,7 @@ nix develop -c python3 scripts/reapi_differential.py \
 |---|---|
 | `0` | Full agreement — all endpoints observably equivalent on every probe. |
 | `2` | At least one divergence — see the per-probe witnesses. |
-| `1` | Operational error (bad arguments, unreachable fleet, etc.). |
+| `1` | Operational error or incomplete comparison (including any harness exception, unavailable endpoint, deadline, or cancellation). A completed report uses verdict `error` and preserves partial observations. |
 
 ### Output
 
@@ -151,10 +157,10 @@ Because the harness drives any REAPI endpoint, the gateway can sit in front of
 one of them: point an `--endpoint` at a `bin/rechaos serve` instance configured
 with a fault policy (see [fault-dsl.md](fault-dsl.md) and
 [timeline-format.md](timeline-format.md)) and differentially compare "endpoint
-under fault injection" against "endpoint clean". A seeded gateway policy plus the
-seeded probe battery makes the whole comparison reproducible: the same
-`--seed` and the same gateway policy seed regrow the identical fault schedule and
-the identical divergence.
+under fault injection" against "endpoint clean". A seeded gateway policy gives the same decisions only for the same observed
+event trace. Save gateway timelines as well as the differential report, replay
+the recorded decisions, and verify event coverage and fingerprints. The harness
+does not reproduce server scheduling or guarantee the same divergence.
 
 ## Relationship to the other tools
 

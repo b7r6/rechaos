@@ -1,17 +1,20 @@
 # The rechaos formal REAPI specification
 
-`lean/Rechaos/Spec.lean` (namespace `Rechaos.Spec`) is a machine-checked statement
-of what a correct Remote Execution API (REAPI) server must do. It models the
-content-addressed store as a finite association map `digest ⇀ bytes` and the REAPI
-surface as a labelled transition system (LTS), then **proves** the structural laws
-that any conforming CAS / Action Cache / ByteStream server is obliged to uphold.
+`lean/Rechaos/Spec.lean` (namespace `Rechaos.Spec`) formalizes a selected
+sequential store model: a finite map `digest ⇀ bytes`, operations over that map,
+and structural laws about their results. Its theorems prove properties of those
+Lean definitions. They do not establish full REAPI conformance, prove the Python
+checker sound, or verify any live server.
 
-This spec is the formal backing for the runtime model checker
-`scripts/consistency_oracle.py`. The oracle records a concurrent history off a live
-server and checks it against the *same* properties; the Lean theorems establish
-that those properties are internally consistent and that they are exactly the laws
-a correct store satisfies. A server is *graded* against this spec: every oracle
-violation is a counterexample to one of the theorems below holding of that server.
+`scripts/consistency_oracle.py` checks related properties over recorded concurrent
+histories. That connection is a documented mapping backed by regression tests,
+not an extraction or refinement proof. Interpret findings with the oracle's
+assumptions: complete histories, known initial state, accounted-for eviction,
+resolved write outcomes, and stable value fingerprints. REAPI permits
+implementation-specific CAS lifetimes and equivalent AC result rewrites; a
+last-writer register with only explicit eviction is a stronger chosen model.
+The runtime checker also models the protocol's always-present empty CAS blob;
+that special case is outside this abstract Lean store.
 
 Everything in the module is proved with no `sorry`, no `admit`, and no new `axiom`
 (the theorems depend only on `propext`). The model abstracts over the concrete
@@ -71,8 +74,9 @@ write must claim the key's own digest. `read_content_integrity` is exactly the
 invariant that check asserts of the server on every read; `integral` is the store
 state it presupposes, and `step_preserves_integral_cas` proves that a server that
 only accepts valid writes can never leave that state. AC keys do not encode their
-value and are skipped by C1 — mirrored here by `integral` ranging over CAS bindings
-and AC being governed by Law 4 instead.
+value and are skipped by C1. In Lean, `integral` ranges over the entire supplied
+store; preservation is proved for the CAS fragment, not arbitrary mixed CAS/AC
+operation sequences. Law 4 separately describes the mutable register behavior.
 
 ### Law 2 — Write-then-read availability (oracle C2 + the C3 read-latest edge)
 
@@ -84,8 +88,8 @@ and AC being governed by Law 4 instead.
 - `write_then_present` — after a valid write, `present` holds for the digest.
 
 **Oracle:** `check_monotone_availability` (C2). Once a write of `K` *completes* at
-`t*`, every later-*starting* op must observe `K` present (read `!= MISSING`,
-find_missing `!= absent`) unless an eviction is modelled in `[t*, op.inv]`. The
+`t*`, a later-*starting* op must observe `K` present (read `!= MISSING`,
+find_missing `!= absent`) unless an eviction can explain absence during the write/observation interval. The
 "absent eviction" caveat in the law corresponds to the oracle's eviction carve-out.
 This is also the read-returns-the-latest-write edge that
 `check_linearizability` (C3) enforces for a CAS register: immediately after a
@@ -146,15 +150,16 @@ To grade a server `S`:
    - `linearizability` ⟹ Law 2 / Law 4 (`write_then_read`, `update_then_get`,
      `lastWriterWins`).
 
-A server with no violations across a sufficiently rich history exhibits, on that
-history, exactly the behaviour the Lean LTS is proved to have. The spec is the
-"what correct means"; the oracle is the "did this server do it".
+No violations means the recorded history passes the implemented checks under
+the stated assumptions. It does not prove unrecorded behavior or all REAPI
+requirements. The Lean laws explain the selected model; the Python search
+remains independently implemented and tested.
 
 ## Rebuilding / checking the proofs
 
 ```
-cd lean && nix shell nixpkgs#lean4 --command lake build      # green = proofs check
-grep -rnE '(^|[^`])(sorry|admit)' lean/Rechaos               # must be empty
+(cd lean && lake build)                                     # checks Lean proofs
+python3 scripts/check_lean.py lean                            # rejects proof holes/new axioms
 nix flake check                                              # lean gate includes Spec
 ```
 

@@ -4,19 +4,19 @@ This is the citable catalog of the invariants the **pure core** (`src/Rechaos/Co
 asserts about itself — the fault algebra, the SplitMix64 scheduler, the oracle,
 and the shrinker. Where [`invariants.md`](invariants.md) names what rechaos
 asserts about a *live REAPI endpoint*, this page names what the core asserts
-about *its own values and functions*: the propositions that make the core the
-project's thesis and the seed for a future Lean port.
+about *its own values and functions*: the propositions that make the executable core
+reliable. See `formal.md` for the separate Lean models and proof boundaries.
 
 Each proposition below gives: the exact statement, the Core function it is a
 property of, the `CoreSpec` check-site name that exercises it (the string passed
-to `check`), and whether it is **proved as property** (a QuickCheck property or a
+to `check`), and whether it is **tested as property** (a QuickCheck property or a
 pinned vector in [`test/CoreSpec.hs`](../test/CoreSpec.hs)) or **not yet a
 theorem** (asserted by construction / documented but awaiting a machine-checked
 proof in the Lean port).
 
 Everything in the core is pure, total, and nonnegative: no IO, no clock, no
 filesystem, no randomness beyond the explicit seed, and no partial functions. A
-proposition marked *proved as property* is checked over generated inputs with
+proposition marked *tested as property* is checked over generated inputs with
 `maxSuccess = 500`; a boundary proposition is additionally pinned at its
 endpoints.
 
@@ -33,7 +33,7 @@ endpoints.
   `"SplitMix64 published nonzero-seed vector"`,
   `"state advance is exactly the golden-ratio increment, independent of output"`,
   `"the advance step is injective over a sampled seed range"`.
-- **Status.** Proved as property (plus pinned vectors).
+- **Status.** Tested as property (plus pinned vectors).
 
 ### C2. One generator step per event
 
@@ -50,7 +50,7 @@ endpoints.
   `"schedule is deterministic for an arbitrary policy and event stream"`,
   `"trace-split agreement generalizes to an arbitrary policy"`,
   `"seed advances exactly once per event for an arbitrary policy"`.
-- **Status.** Proved as property (the arbitrary-`Policy` variants generalize the
+- **Status.** Tested as property (the arbitrary-`Policy` variants generalize the
   single-rule helper to the full `Arbitrary Policy` instance).
 
 ### C3. The ppm firing test is exact at its endpoints
@@ -65,7 +65,7 @@ endpoints.
   `"chancePpm == 0 never fires over a generated event stream"`,
   `"chancePpm == maxPpm always fires over a generated event stream"`,
   `"empirical injection frequency tracks chancePpm within tolerance"`.
-- **Status.** Proved as property (endpoints exhaustively, interior statistically
+- **Status.** Tested as property (endpoints over generated traces, interior statistically
   within tolerance).
 
 ## Fault algebra
@@ -80,7 +80,7 @@ endpoints.
 - **Check-site.** `"statusFromCode inverts statusCode for every Status"`,
   `"the nine documented gRPC codes are pinned exactly"`,
   `"excluded gRPC codes decode to Nothing"`.
-- **Status.** Proved as property (plus a pinned code table).
+- **Status.** Tested as property (plus a pinned code table).
 
 ### C5. `dribbleMicros` ceiling-minimality
 
@@ -96,7 +96,7 @@ endpoints.
   `"dribble micros are ceiling-minimal: one microsecond less under-delivers"`,
   `"dribbleMicros is the exact floor when rate divides evenly, and zero bytes give zero"`,
   `"dribbleMicros divides exactly with no spurious +1 on an aligned product"`.
-- **Status.** Proved as property.
+- **Status.** Tested as property.
 
 ### C6. `dribbleSchedule` offset-preservation and time-agreement
 
@@ -112,7 +112,7 @@ endpoints.
   `"dribbleSchedule preserves the total offset and agrees with dribbleMicros"`,
   `"dribbleSchedule chunk sizes are all chunkBytes except possibly the last"`,
   `"dribbleSchedule on an empty payload is the singleton (0,0)"`.
-- **Status.** Proved as property.
+- **Status.** Tested as property.
 
 ## Shrinker
 
@@ -131,7 +131,7 @@ endpoints.
   `"every generated candidate is strictly smaller under the termination measure"`,
   `"minimizer only accepts confirmed reproductions"`,
   `"candidate generation produces no intensity variant at the Truncate and Dribble caps"`.
-- **Status.** Proved as property (deletion-1-minimality is established for the
+- **Status.** Tested as property (deletion-1-minimality is established for the
   tested predicates; the general theorem is not yet machine-checked — a Lean-port
   target).
 
@@ -151,11 +151,11 @@ endpoints.
   `"diff reports each key once in ascending order"`,
   `"unsuccessful builds are never correctness findings"` (and the
   `"... over all entry kinds"` variants).
-- **Status.** Proved as property.
+- **Status.** Tested as property.
 
 ## Replay
 
-### C9. `verifyReplay` forward vs `verifyReplayExact` bijective semantics
+### C9. Expected-event coverage and rejection of extra injected decisions
 
 - **Statement.** `verifyReplay expected observed` is the forward inclusion: every
   expected event must have occurred, unchanged (same fingerprint modulo arrival
@@ -163,8 +163,9 @@ endpoints.
   correct semantics for a sparse fault timeline. `verifyReplayExact` runs that
   forward check *and* the reverse inclusion, failing closed on any observed
   decision whose injection is `Just` but whose `eventKey` is absent from
-  `expected`. `verifyReplayExact` thus certifies bijective agreement for full
-  recordings while tolerating pass-through (non-injected) observed events.
+  `expected`. `verifyReplayExact` certifies expected-event coverage and agreement on the
+  injected decisions, while permitting extra non-injected observed events.
+  It does not require equality of the entire event sets.
 - **Core function.** `Rechaos.Core.Scheduler.verifyReplay`,
   `Rechaos.Core.Scheduler.verifyReplayExact`,
   `Rechaos.Core.Scheduler.replayDecision`.
@@ -175,7 +176,7 @@ endpoints.
   `"verifyReplayExact tolerates an extra non-injected (pass-through) observed event"`,
   `"both verifyReplay and verifyReplayExact accept an exact match"`,
   `"verifyReplayExact still fails closed on a missing expected event"`.
-- **Status.** Proved as property.
+- **Status.** Tested as property.
 
 ## Numeric invariants
 
