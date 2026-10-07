@@ -20,20 +20,29 @@ def next_seed (s : UInt64) : UInt64 × UInt64 :=
 /-- Iterate an arbitrary step `f` exactly `n` times — a total, pure function of
     the start state. -/
 def iter (f : UInt64 → UInt64) : Nat → UInt64 → UInt64
-  | 0, s => s
+  | 0, s     => s
   | n + 1, s => iter f n (f s)
 
-@[simp] theorem iter_zero (f : UInt64 → UInt64) (s : UInt64) : iter f 0 s = s := rfl
+@[simp]
+theorem iter_zero (f : UInt64 → UInt64) (s : UInt64) : iter f 0 s = s := rfl
 
 /-- One step consumed per count (definitional): the basis of "exactly one
     SplitMix64 step per observed event". -/
-@[simp] theorem iter_succ (f : UInt64 → UInt64) (n : Nat) (s : UInt64) :
-    iter f (n + 1) s = iter f n (f s) := rfl
+@[simp]
+theorem iter_succ
+        (f : UInt64 → UInt64)
+        (n : Nat)
+        (s : UInt64)
+        : iter f (n + 1) s = iter f n (f s) :=
+  rfl
 
 /-- Determinism / additivity of consumption: iterating `m + n` times equals
     iterating `n` times after `m`. Proved by induction, step abstract. -/
-theorem iter_add (f : UInt64 → UInt64) (m n : Nat) (s : UInt64) :
-    iter f (m + n) s = iter f n (iter f m s) := by
+theorem iter_add
+        (f : UInt64 → UInt64)
+        (m n : Nat)
+        (s : UInt64)
+        : iter f (m + n) s = iter f n (iter f m s) := by
   induction m generalizing s with
   | zero => simp
   | succ k ih => simp [Nat.succ_add, ih]
@@ -42,7 +51,7 @@ theorem iter_add (f : UInt64 → UInt64) (m n : Nat) (s : UInt64) :
 def advance (n : Nat) (s : UInt64) : UInt64 := iter (fun s => (next_seed s).2) n s
 
 /-- Determinism of the keystream, as a corollary of `iter_add`. -/
-theorem advance_add (m n : Nat) (s : UInt64) :
-    advance (m + n) s = advance n (advance m s) := iter_add _ m n s
+theorem advance_add (m n : Nat) (s : UInt64) : advance (m + n) s = advance n (advance m s) :=
+  iter_add _ m n s
 
 end Rechaos

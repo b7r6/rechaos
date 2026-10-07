@@ -48,42 +48,54 @@ variable {κ α : Type}
     oracle's `MISSING` / `absent` sentinel. -/
 def lookup [DecidableEq κ] (st : store κ α) (d : κ) : Option α :=
   match st with
-  | [] => none
+  | []             => none
   | (k, v) :: rest => if k = d then some v else lookup rest d
 
 /-- A digest is *present* when it has a binding. Mirrors FindMissingBlobs saying
     "not missing" and a `read`/`find_missing` observing `present`. -/
-def present [DecidableEq κ] (st : store κ α) (d : κ) : Prop :=
-  (lookup st d).isSome = true
+def present [DecidableEq κ] (st : store κ α) (d : κ) : Prop := (lookup st d).isSome = true
 
 instance [DecidableEq κ] (st : store κ α) (d : κ) : Decidable (present st d) := by
   unfold present; infer_instance
 
-@[simp] theorem lookup_nil [DecidableEq κ] (d : κ) :
-    lookup ([] : store κ α) d = none := rfl
+@[simp]
+theorem lookup_nil [DecidableEq κ] (d : κ) : lookup ([] : store κ α) d = none := rfl
 
-@[simp] theorem lookup_cons_self [DecidableEq κ] (rest : store κ α) (d : κ) (v : α) :
-    lookup ((d, v) :: rest) d = some v := by
-  simp [lookup]
+@[simp]
+theorem lookup_cons_self
+        [DecidableEq κ]
+        (rest : store κ α)
+        (d : κ)
+        (v : α)
+        : lookup ((d, v) :: rest) d = some v := by simp [lookup]
 
-theorem lookup_cons_ne [DecidableEq κ] (rest : store κ α) (d k : κ) (v : α)
-    (h : k ≠ d) : lookup ((k, v) :: rest) d = lookup rest d := by
-  simp [lookup, h]
+theorem lookup_cons_ne
+        [DecidableEq κ]
+        (rest : store κ α)
+        (d k : κ)
+        (v : α)
+        (h : k ≠ d)
+        : lookup ((k, v) :: rest) d = lookup rest d := by simp [lookup, h]
 
 /-- A successful lookup witnesses a binding in the store. -/
-theorem lookup_some_mem [DecidableEq κ] (st : store κ α) (d : κ) (v : α)
-    (h : lookup st d = some v) : (d, v) ∈ st := by
+theorem lookup_some_mem
+        [DecidableEq κ]
+        (st : store κ α)
+        (d : κ)
+        (v : α)
+        (h : lookup st d = some v)
+        : (d, v) ∈ st := by
   induction st with
   | nil => simp [lookup] at h
   | cons head rest ih =>
-      obtain ⟨k, w⟩ := head
-      by_cases hk : k = d
-      · subst hk
-        rw [lookup_cons_self] at h
-        have : w = v := by cases h; rfl
-        subst this; exact List.mem_cons_self
-      · rw [lookup_cons_ne rest d k w hk] at h
-        exact List.mem_cons_of_mem _ (ih h)
+    obtain ⟨k, w⟩ := head
+    by_cases hk : k = d
+    · subst hk
+      rw [lookup_cons_self] at h
+      have : w = v := by cases h; rfl
+      subst this; exact List.mem_cons_self
+    · rw [lookup_cons_ne rest d k w hk] at h
+      exact List.mem_cons_of_mem _ (ih h)
 
 -- ── REAPI operations as an LTS ────────────────────────────────────────────────
 
@@ -110,14 +122,10 @@ inductive op (κ α : Type)
 /-- A server's observable response to an `Op`. Observations carry exactly what a
     client sees, so the oracle's recorded outcomes map onto these constructors. -/
 inductive obs (κ α : Type)
-  | /-- A write/update acknowledged (the op completed). -/
-    acked
-  | /-- A read/get returned content. -/
-    got (v : α)
-  | /-- A read/get found nothing (the `MISSING` sentinel). -/
-    notFound
-  | /-- FindMissingBlobs answered with the sublist of absent digests. -/
-    missing (ds : List κ)
+  | /-- A write/update acknowledged (the op completed). -/ acked
+  | /-- A read/get returned content. -/ got (v : α)
+  | /-- A read/get found nothing (the `MISSING` sentinel). -/ notFound
+  | /-- FindMissingBlobs answered with the sublist of absent digests. -/ missing (ds : List κ)
 
 /-- A write is *valid* (content-addressing-conforming) exactly when the bytes
     hash to the digest. REAPI servers MUST reject writes where this fails; our
@@ -134,46 +142,47 @@ def valid (hash : α → κ) (d : κ) (b : α) : Prop := hash b = d
     state change"). FindMissingBlobs returns the input digests filtered to the
     absent ones. UpdateActionResult always binds (last-writer-wins, no content
     constraint — AC keys do not encode their value). -/
-def step [DecidableEq κ] (hash : α → κ) :
-    store κ α → op κ α → store κ α × obs κ α
-  | st, .write d b =>
-      if hash b = d then ((d, b) :: st, .acked) else (st, .acked)
+def step [DecidableEq κ] (hash : α → κ) : store κ α → op κ α → store κ α × obs κ α
+  | st, .write d b => if hash b = d then ((d, b) :: st, .acked) else (st, .acked)
   | st, .read d =>
-      match lookup st d with
-      | some v => (st, .got v)
-      | none   => (st, .notFound)
-  | st, .findMissing ds =>
-      (st, .missing (ds.filter (fun d => !(present st d : Bool))))
-  | st, .updateActionResult k r =>
-      ((k, r) :: st, .acked)
+    match lookup st d with
+    | some v => (st, .got v)
+    | none   => (st, .notFound)
+  | st, .findMissing ds => (st, .missing (ds.filter (fun d => !(present st d : Bool))))
+  | st, .updateActionResult k r => ((k, r) :: st, .acked)
   | st, .getActionResult k =>
-      match lookup st k with
-      | some v => (st, .got v)
-      | none   => (st, .notFound)
+    match lookup st k with
+    | some v => (st, .got v)
+    | none   => (st, .notFound)
 
 /-- Run a sequence of ops from a start state, returning the final state. A
     *history* in the oracle's sense; the laws below quantify over any such run. -/
 def run [DecidableEq κ] (hash : α → κ) (st : store κ α) : List (op κ α) → store κ α
-  | [] => st
+  | []         => st
   | op :: rest => run hash (step hash st op).1 rest
 
 /-- A store is *integral* when every binding's content hashes to its key — the
     content-addressing well-formedness invariant. CAS/ByteStream keys encode
     their value; this is the store-level statement of that. -/
-def integral (hash : α → κ) (st : store κ α) : Prop :=
-  ∀ d b, (d, b) ∈ st → hash b = d
+def integral (hash : α → κ) (st : store κ α) : Prop := ∀ d b, (d, b) ∈ st → hash b = d
 
 /-- A read returns `some v` exactly as its observation's content. A reusable
     bridge from the LTS observation back to the store lookup. -/
-theorem read_obs_eq [DecidableEq κ] (hash : α → κ) (st : store κ α) (d : κ) (v : α)
-    (hobs : (step hash st (.read d)).2 = .got v) : lookup st d = some v := by
+theorem read_obs_eq
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (v : α)
+        (hobs : (step hash st (.read d)).2 = .got v)
+        : lookup st d = some v := by
   simp only [step] at hobs
   cases hl : lookup st d with
   | none => rw [hl] at hobs; exact absurd hobs (by simp)
   | some v' =>
-      rw [hl] at hobs
-      have hvv : v' = v := by injection hobs
-      rw [hvv]
+    rw [hl] at hobs
+    have hvv : v' = v := by injection hobs
+    rw [hvv]
 
 -- ── LAW 1: content integrity ──────────────────────────────────────────────────
 
@@ -185,13 +194,17 @@ theorem read_obs_eq [DecidableEq κ] (hash : α → κ) (st : store κ α) (d : 
     content-addressed is NOT assumed — instead we prove integrity for the CAS
     fragment, i.e. runs whose ops are writes/reads/finds. AC is handled by its own
     monotonicity law below. -/
-theorem step_preserves_integral_cas [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (d : κ) (b : α) (hst : integral hash st) :
-    integral hash (step hash st (.write d b)).1 := by
+theorem step_preserves_integral_cas
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (b : α)
+        (hst : integral hash st)
+        : integral hash (step hash st (.write d b)).1 := by
   intro d' b' hmem
   by_cases h : hash b = d
-  · have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by
-      simp only [step, if_pos h]
+  · have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by simp only [step, if_pos h]
     rw [hstep] at hmem
     rcases List.mem_cons.mp hmem with heq | htail
     · -- the freshly written binding; its hash matches by `h`
@@ -199,25 +212,31 @@ theorem step_preserves_integral_cas [DecidableEq κ] (hash : α → κ)
       have hb : b' = b := ((Prod.mk.injEq d b d' b').mp heq.symm).2.symm
       rw [hd, hb]; exact h
     · exact hst d' b' htail
-  · have hstep : (step hash st (.write d b)).1 = st := by
-      simp only [step, if_neg h]
+  · have hstep : (step hash st (.write d b)).1 = st := by simp only [step, if_neg h]
     rw [hstep] at hmem
     exact hst d' b' hmem
 
 /-- Reads never change the store, so integrity is trivially preserved. -/
-theorem step_read_preserves_integral [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (d : κ) (hst : integral hash st) :
-    integral hash (step hash st (.read d)).1 := by
+theorem step_read_preserves_integral
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (hst : integral hash st)
+        : integral hash (step hash st (.read d)).1 := by
   intro d' b' hmem
-  have : (step hash st (.read d)).1 = st := by
-    simp only [step]; cases lookup st d <;> rfl
+  have : (step hash st (.read d)).1 = st := by simp only [step]; cases lookup st d <;> rfl
   rw [this] at hmem
   exact hst d' b' hmem
 
 /-- FindMissingBlobs never changes the store, so integrity is preserved. -/
-theorem step_find_missing_preserves_integral [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (ds : List κ) (hst : integral hash st) :
-    integral hash (step hash st (.findMissing ds)).1 := by
+theorem step_find_missing_preserves_integral
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (ds : List κ)
+        (hst : integral hash st)
+        : integral hash (step hash st (.findMissing ds)).1 := by
   intro d' b' hmem
   have : (step hash st (.findMissing ds)).1 = st := rfl
   rw [this] at hmem
@@ -226,11 +245,15 @@ theorem step_find_missing_preserves_integral [DecidableEq κ] (hash : α → κ)
 /-- Content integrity, the observable form: in an integral store, any `read` that
     returns content returns content that hashes to the digest. This is the C1
     predicate the oracle checks structurally on every CAS read. -/
-theorem read_content_integrity [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (d : κ) (v : α)
-    (hst : integral hash st)
-    (hobs : (step hash st (.read d)).2 = .got v) :
-    hash v = d := by
+theorem read_content_integrity
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (v : α)
+        (hst : integral hash st)
+        (hobs : (step hash st (.read d)).2 = .got v)
+        : hash v = d := by
   have hl : lookup st d = some v := read_obs_eq hash st d v hobs
   exact hst d v (lookup_some_mem st d v hl)
 
@@ -241,23 +264,31 @@ theorem read_content_integrity [DecidableEq κ] (hash : α → κ)
     a correct server, absent eviction, must serve what it just accepted. It is
     the formal form of the oracle's monotone-availability (C2) + the read-returns-
     latest-write edge of linearizability (C3) for a CAS register. -/
-theorem write_then_read [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (d : κ) (b : α) (hvalid : valid hash d b) :
-    (step hash (step hash st (.write d b)).1 (.read d)).2 = .got b := by
+theorem write_then_read
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (b : α)
+        (hvalid : valid hash d b)
+        : (step hash (step hash st (.write d b)).1 (.read d)).2 = .got b := by
   unfold valid at hvalid
-  have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by
-    simp only [step, if_pos hvalid]
+  have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by simp only [step, if_pos hvalid]
   rw [hstep]
   simp only [step, lookup_cons_self]
 
 /-- After a valid `write d b`, the digest `d` is present. The availability half of
     write-then-read, in the `present`/FindMissingBlobs vocabulary. -/
-theorem write_then_present [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (d : κ) (b : α) (hvalid : valid hash d b) :
-    present (step hash st (.write d b)).1 d := by
+theorem write_then_present
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (d : κ)
+        (b : α)
+        (hvalid : valid hash d b)
+        : present (step hash st (.write d b)).1 d := by
   unfold valid at hvalid
-  have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by
-    simp only [step, if_pos hvalid]
+  have hstep : (step hash st (.write d b)).1 = (d, b) :: st := by simp only [step, if_pos hvalid]
   unfold present
   rw [hstep, lookup_cons_self]
   rfl
@@ -269,17 +300,25 @@ theorem write_then_present [DecidableEq κ] (hash : α → κ)
 def find_missing_result [DecidableEq κ] (st : store κ α) (ds : List κ) : List κ :=
   ds.filter (fun d => !(present st d : Bool))
 
-theorem step_find_missing_eq [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (ds : List κ) :
-    (step hash st (.findMissing ds)).2 = .missing (find_missing_result st ds) := rfl
+theorem step_find_missing_eq
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (ds : List κ)
+        : (step hash st (.findMissing ds)).2 = .missing (find_missing_result st ds) :=
+  rfl
 
 /-- SOUNDNESS: every digest FindMissingBlobs reports as missing is genuinely
     absent from the store (and was in the query). A server that reports a present
     blob as missing — causing needless re-upload or, worse, masking a real
     presence — violates this. -/
-theorem find_missing_sound [DecidableEq κ] (st : store κ α) (ds : List κ) (d : κ)
-    (h : d ∈ find_missing_result st ds) :
-    d ∈ ds ∧ ¬ present st d := by
+theorem find_missing_sound
+        [DecidableEq κ]
+        (st : store κ α)
+        (ds : List κ)
+        (d : κ)
+        (h : d ∈ find_missing_result st ds)
+        : d ∈ ds ∧ ¬present st d := by
   unfold find_missing_result at h
   rw [List.mem_filter] at h
   obtain ⟨hmem, hpred⟩ := h
@@ -293,9 +332,14 @@ theorem find_missing_sound [DecidableEq κ] (st : store κ α) (ds : List κ) (d
     missing. A server that omits a truly-missing blob from the response — causing
     a client to skip an upload it needed — violates this. Together with soundness
     this pins the FindMissingBlobs response to exactly the absent-in-query set. -/
-theorem find_missing_complete [DecidableEq κ] (st : store κ α) (ds : List κ) (d : κ)
-    (hmem : d ∈ ds) (habs : ¬ present st d) :
-    d ∈ find_missing_result st ds := by
+theorem find_missing_complete
+        [DecidableEq κ]
+        (st : store κ α)
+        (ds : List κ)
+        (d : κ)
+        (hmem : d ∈ ds)
+        (habs : ¬present st d)
+        : d ∈ find_missing_result st ds := by
   unfold find_missing_result
   rw [List.mem_filter]
   refine ⟨hmem, ?_⟩
@@ -305,8 +349,12 @@ theorem find_missing_complete [DecidableEq κ] (st : store κ α) (ds : List κ)
 
 /-- The exact characterisation: FindMissingBlobs reports `d` iff `d` was queried
     and is absent. Soundness ∧ completeness, packaged. -/
-theorem find_missing_iff [DecidableEq κ] (st : store κ α) (ds : List κ) (d : κ) :
-    d ∈ find_missing_result st ds ↔ (d ∈ ds ∧ ¬ present st d) := by
+theorem find_missing_iff
+        [DecidableEq κ]
+        (st : store κ α)
+        (ds : List κ)
+        (d : κ)
+        : d ∈ find_missing_result st ds ↔ (d ∈ ds ∧ ¬present st d) := by
   constructor
   · exact find_missing_sound st ds d
   · exact fun ⟨hm, ha⟩ => find_missing_complete st ds d hm ha
@@ -314,8 +362,13 @@ theorem find_missing_iff [DecidableEq κ] (st : store κ α) (ds : List κ) (d :
 /-- Corollary bridging to availability: a present digest is NEVER reported missing
     — the exact statement the oracle leans on when it flags "find_missing said
     absent after a completed write". -/
-theorem present_not_find_missing [DecidableEq κ] (st : store κ α) (ds : List κ) (d : κ)
-    (hpres : present st d) : d ∉ find_missing_result st ds := by
+theorem present_not_find_missing
+        [DecidableEq κ]
+        (st : store κ α)
+        (ds : List κ)
+        (d : κ)
+        (hpres : present st d)
+        : d ∉ find_missing_result st ds := by
   intro hcontra
   exact (find_missing_sound st ds d hcontra).2 hpres
 
@@ -325,10 +378,13 @@ theorem present_not_find_missing [DecidableEq κ] (st : store κ α) (ds : List 
     returns `r`: last-writer-wins. The AC is a mutable register and this is the
     "a read sees the most recent write" edge the oracle's per-key linearizability
     (C3) enforces for AC keys. -/
-theorem update_then_get [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (k : κ) (r : α) :
-    (step hash (step hash st (.updateActionResult k r)).1 (.getActionResult k)).2
-      = .got r := by
+theorem update_then_get
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (k : κ)
+        (r : α)
+        : (step hash (step hash st (.updateActionResult k r)).1 (.getActionResult k)).2 = .got r := by
   have hstep : (step hash st (.updateActionResult k r)).1 = (k, r) :: st := rfl
   rw [hstep]
   simp only [step, lookup_cons_self]
@@ -336,9 +392,13 @@ theorem update_then_get [DecidableEq κ] (hash : α → κ)
 /-- Monotone presence for AC: once a key is updated it is present, and remains
     present under any *further* update of the same key (the newer binding shadows
     but never removes availability). The availability spine of AC monotonicity. -/
-theorem update_then_present [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (k : κ) (r : α) :
-    present (step hash st (.updateActionResult k r)).1 k := by
+theorem update_then_present
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (k : κ)
+        (r : α)
+        : present (step hash st (.updateActionResult k r)).1 k := by
   have hstep : (step hash st (.updateActionResult k r)).1 = (k, r) :: st := rfl
   unfold present
   rw [hstep, lookup_cons_self]
@@ -347,28 +407,40 @@ theorem update_then_present [DecidableEq κ] (hash : α → κ)
 /-- Last-writer-wins, stated on the store: after two successive updates of the
     same key, lookup yields the *second* (most recent) result. The core
     monotonicity fact — a later write cannot be masked by an earlier one. -/
-theorem last_writer_wins [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (k : κ) (r₁ r₂ : α) :
-    lookup (step hash (step hash st (.updateActionResult k r₁)).1
-             (.updateActionResult k r₂)).1 k = some r₂ := by
+theorem last_writer_wins
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (k : κ)
+        (r₁ r₂ : α)
+        : lookup
+          (step hash (step hash st (.updateActionResult k r₁)).1 (.updateActionResult k r₂)).1
+          k
+            = some r₂ := by
   have h₁ : (step hash st (.updateActionResult k r₁)).1 = (k, r₁) :: st := rfl
   rw [h₁]
-  have h₂ : (step hash ((k, r₁) :: st) (.updateActionResult k r₂)).1
-      = (k, r₂) :: (k, r₁) :: st := rfl
+  have h₂ : (step hash ((k, r₁) :: st) (.updateActionResult k r₂)).1 = (k, r₂) :: (k, r₁) :: st :=
+    rfl
   rw [h₂, lookup_cons_self]
 
 /-- A later update of a *different* key does not disturb an earlier key's binding:
     AC updates are independent across keys (the per-key register view the oracle
     takes is sound). -/
-theorem update_other_key_stable [DecidableEq κ] (hash : α → κ)
-    (st : store κ α) (k k' : κ) (r r' : α) (hne : k' ≠ k) :
-    lookup (step hash (step hash st (.updateActionResult k r)).1
-             (.updateActionResult k' r')).1 k
-      = lookup (step hash st (.updateActionResult k r)).1 k := by
+theorem update_other_key_stable
+        [DecidableEq κ]
+        (hash : α → κ)
+        (st : store κ α)
+        (k k' : κ)
+        (r r' : α)
+        (hne : k' ≠ k)
+        : lookup
+          (step hash (step hash st (.updateActionResult k r)).1 (.updateActionResult k' r')).1
+          k
+            = lookup (step hash st (.updateActionResult k r)).1 k := by
   have h₁ : (step hash st (.updateActionResult k r)).1 = (k, r) :: st := rfl
   rw [h₁]
-  have h₂ : (step hash ((k, r) :: st) (.updateActionResult k' r')).1
-      = (k', r') :: (k, r) :: st := rfl
+  have h₂ : (step hash ((k, r) :: st) (.updateActionResult k' r')).1 = (k', r') :: (k, r) :: st :=
+    rfl
   rw [h₂, lookup_cons_ne _ k k' r' hne]
 
 end Rechaos.Spec

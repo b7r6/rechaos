@@ -59,14 +59,11 @@ def status_from_code : Nat → Option status
 
 /-- The algebra of faults rechaos can inject at a matched event. -/
 inductive Fault
-  | /-- Delay delivery by the given number of microseconds. -/
-    delay (micros : Nat)
-  | /-- Abort the RPC with the given gRPC `Status`. -/
-    abort (status : status)
-  | /-- Deliver slowly: `dribble bytesPerSecond chunkBytes`. -/
-    dribble (bytesPerSecond : Nat) (chunkBytes : Nat)
-  | /-- Truncate the payload, keeping only the leading `keepBytes` bytes. -/
-    truncate (keepBytes : Nat)
+  | /-- Delay delivery by the given number of microseconds. -/ delay (micros : Nat)
+  | /-- Abort the RPC with the given gRPC `Status`. -/ abort (status : status)
+  | /-- Deliver slowly: `dribble bytesPerSecond chunkBytes`. -/ dribble (bytesPerSecond : Nat)
+        (chunkBytes : Nat)
+  | /-- Truncate the payload, keeping only the leading `keepBytes` bytes. -/ truncate (keepBytes : Nat)
   | /-- Corrupt the payload in place, flipping the low bit of each of the leading
         `bytes` payload bytes. Length-preserving, unlike `truncate`. -/
     corrupt (bytes : Nat)
@@ -75,22 +72,22 @@ inductive Fault
 /-- A predicate over `Event`s selecting where a `Rule` applies. Absent optional
     fields default to "any"; present fields must all hold. Bounds are inclusive. -/
 structure Target where
-  method       : String
-  direction    : Direction
-  occurrence   : Option Nat := none
-  message_index : Option Nat := none
+  method         : String
+  direction      : Direction
+  occurrence     : Option Nat := none
+  message_index  : Option Nat := none
   min_blob_bytes : Option Nat := none
   max_blob_bytes : Option Nat := none
-  after_micros  : Option Nat := none
-  before_micros : Option Nat := none
+  after_micros   : Option Nat := none
+  before_micros  : Option Nat := none
   deriving Repr, DecidableEq, Inhabited
 
 /-- A policy rule: inject `fault` at events matching `target` with probability
     `chancePpm` parts per million. -/
 structure rule where
-  target    : Target
+  target     : Target
   chance_ppm : Nat
-  fault     : Fault
+  fault      : Fault
   deriving Repr, DecidableEq, Inhabited
 
 /-- Inclusive upper bound on a firing probability in parts per million:
@@ -117,8 +114,7 @@ def max_dribble_chunk_bytes : Nat := 4194304
     `dribble` requires a positive rate and a chunk size in
     `1 .. maxDribbleChunkBytes`; every other fault is unconstrained. -/
 def valid_fault_bounds : Fault → Bool
-  | .dribble rate chunkBytes =>
-      rate > 0 && chunkBytes >= 1 && chunkBytes <= max_dribble_chunk_bytes
+  | .dribble rate chunkBytes => rate > 0 && chunkBytes >= 1 && chunkBytes <= max_dribble_chunk_bytes
   | _ => true
 
 /-- A complete policy: a scheduling seed and an ordered list of rules. Rule
@@ -131,9 +127,9 @@ structure policy where
 /-- A single observation handed to the core by the shell. Occurrences are
     1-based per method; message indices are 1-based per direction. -/
 structure Event where
-  method        : String
-  occurrence    : Nat
-  direction     : Direction
+  method         : String
+  occurrence     : Nat
+  direction      : Direction
   message_index  : Nat
   blob_bytes     : Option Nat := none
   elapsed_micros : Nat
@@ -155,15 +151,14 @@ abbrev timeline := List decision
 abbrev EventKey := String × Nat × Direction × Nat
 
 /-- Project an `Event` onto its identity `EventKey`. Ignores payload and timing. -/
-def eventKey (e : Event) : EventKey :=
-  (e.method, e.occurrence, e.direction, e.message_index)
+def eventKey (e : Event) : EventKey := (e.method, e.occurrence, e.direction, e.message_index)
 
 /-- The identity-significant projection of an `Event`: every field except
     `elapsedMicros`, which may vary between a recording and a live replay. -/
 structure Fingerprint where
-  method       : String
-  occurrence   : Nat
-  direction    : Direction
+  method        : String
+  occurrence    : Nat
+  direction     : Direction
   message_index : Nat
   blob_bytes    : Option Nat
   message_bytes : Nat
@@ -172,18 +167,17 @@ structure Fingerprint where
 
 /-- Project an `Event` onto its `Fingerprint`, excluding `elapsedMicros`. -/
 def fingerprint (e : Event) : Fingerprint :=
-  { method := e.method
-  , occurrence := e.occurrence
-  , direction := e.direction
-  , message_index := e.message_index
-  , blob_bytes := e.blob_bytes
-  , message_bytes := e.message_bytes
-  , payload_hash := e.payload_hash }
+  { method        := e.method,
+    occurrence    := e.occurrence,
+    direction     := e.direction,
+    message_index := e.message_index,
+    blob_bytes    := e.blob_bytes,
+    message_bytes := e.message_bytes,
+    payload_hash  := e.payload_hash }
 
 /-- Equality modulo arrival time: `elapsedMicros` is carved out, every other
     field must agree. Defined as `Fingerprint` equality. -/
-def same_event (a b : Event) : Bool :=
-  fingerprint a == fingerprint b
+def same_event (a b : Event) : Bool := fingerprint a == fingerprint b
 
 -- ── structural lemmas ──────────────────────────────────────────────────────
 
@@ -196,17 +190,22 @@ theorem ppm_denominator_eq_max_ppm : ppm_denominator = max_ppm := rfl
 
 /-- `eventKey` depends only on the identity fields, not on timing or payload:
     two events agreeing on them share an `eventKey`. -/
-theorem event_key_congr (e : Event) (t : Nat) :
-    eventKey { e with elapsed_micros := t } = eventKey e := rfl
+theorem event_key_congr
+        (e : Event)
+        (t : Nat)
+        : eventKey { e with elapsed_micros := t } = eventKey e :=
+  rfl
 
 /-- `fingerprint` ignores `elapsedMicros`: overwriting it leaves the fingerprint
     (and hence `sameEvent`) unchanged. -/
-theorem fingerprint_elapsed_irrelevant (e : Event) (t : Nat) :
-    fingerprint { e with elapsed_micros := t } = fingerprint e := rfl
+theorem fingerprint_elapsed_irrelevant
+        (e : Event)
+        (t : Nat)
+        : fingerprint { e with elapsed_micros := t } = fingerprint e :=
+  rfl
 
 /-- `sameEvent` is reflexive. -/
-theorem same_event_refl (e : Event) : same_event e e = true := by
-  simp [same_event]
+theorem same_event_refl (e : Event) : same_event e e = true := by simp [same_event]
 
 /-- `validFaultBounds` accepts every non-dribble fault unconditionally. -/
 theorem valid_fault_bounds_delay (m : Nat) : valid_fault_bounds (.delay m) = true := rfl
