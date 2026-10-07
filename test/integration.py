@@ -8,6 +8,8 @@ import json
 import os
 import pathlib
 import signal
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,6 +27,18 @@ READ = "google.bytestream.ByteStream/Read"
 WRITE = "google.bytestream.ByteStream/Write"
 MISSING = "build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
 DATA = b"rechaos deterministic artifact\n" * 4096
+
+def binary():
+    override = os.environ.get("RECHAOS_BIN")
+    if override:
+        return override
+    for path in (ROOT / "result/bin/rechaos", ROOT / "bin/rechaos"):
+        if path.is_file():
+            return str(path)
+    installed = shutil.which("rechaos")
+    if installed:
+        return installed
+    raise RuntimeError("build rechaos first, or set RECHAOS_BIN to the executable")
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -69,6 +83,7 @@ def missing(channel, timeout=5):
 class Fixture:
     def __init__(self, listen_port=0):
         self.blobs = {digest(DATA): DATA}
+        self.actions = {}
         self.metadata = []
         self.reads_cancelled = threading.Event()
         self.server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=12))
@@ -78,11 +93,25 @@ class Fixture:
                     response_serializer=bs.ReadResponse.SerializeToString),
                 "Write": grpc.stream_unary_rpc_method_handler(self.write, request_deserializer=bs.WriteRequest.FromString,
                     response_serializer=bs.WriteResponse.SerializeToString),
+                "QueryWriteStatus": grpc.unary_unary_rpc_method_handler(self.query,
+                    request_deserializer=bs.QueryWriteStatusRequest.FromString,
+                    response_serializer=bs.QueryWriteStatusResponse.SerializeToString),
             }),
             grpc.method_handlers_generic_handler("build.bazel.remote.execution.v2.ContentAddressableStorage", {
                 "FindMissingBlobs": grpc.unary_unary_rpc_method_handler(self.missing,
                     request_deserializer=re.FindMissingBlobsRequest.FromString,
                     response_serializer=re.FindMissingBlobsResponse.SerializeToString),
+                "GetTree": grpc.unary_stream_rpc_method_handler(self.get_tree,
+                    request_deserializer=re.GetTreeRequest.FromString,
+                    response_serializer=re.GetTreeResponse.SerializeToString),
+            }),
+            grpc.method_handlers_generic_handler("build.bazel.remote.execution.v2.ActionCache", {
+                "GetActionResult": grpc.unary_unary_rpc_method_handler(self.get_action,
+                    request_deserializer=re.GetActionResultRequest.FromString,
+                    response_serializer=re.ActionResult.SerializeToString),
+                "UpdateActionResult": grpc.unary_unary_rpc_method_handler(self.update_action,
+                    request_deserializer=re.UpdateActionResultRequest.FromString,
+                    response_serializer=re.ActionResult.SerializeToString),
             }),
         ))
         self.port = self.server.add_insecure_port(f"127.0.0.1:{listen_port}")
@@ -96,6 +125,11 @@ class Fixture:
         if data is None:
             context.set_trailing_metadata((("x-upstream-trailing", "kept"), ("grpc-status-details-bin", b"details")))
             context.abort(grpc.StatusCode.NOT_FOUND, "blob absent")
+        if request.read_offset < 0 or request.read_offset > len(data) or request.read_limit < 0:
+            context.abort(grpc.StatusCode.OUT_OF_RANGE, "bad range")
+        data = data[request.read_offset:]
+        if request.read_limit:
+            data = data[:request.read_limit]
         context.set_trailing_metadata((("x-upstream-trailing", "kept"),))
         try:
             for offset in range(0, len(data), 32768):
@@ -128,6 +162,30 @@ class Fixture:
     def missing(self, request, context):
         return re.FindMissingBlobsResponse(missing_blob_digests=[d for d in request.blob_digests if d.hash not in self.blobs])
 
+    def query(self, request, context):
+        key = request.resource_name.split("/")[-2]
+        if key not in self.blobs:
+            context.abort(grpc.StatusCode.NOT_FOUND, "upload absent")
+        return bs.QueryWriteStatusResponse(committed_size=len(self.blobs[key]), complete=True)
+
+    def get_tree(self, request, context):
+        yield re.GetTreeResponse()
+
+    def get_action(self, request, context):
+        if request.action_digest.hash not in self.actions:
+            context.abort(grpc.StatusCode.NOT_FOUND, "action absent")
+        return self.actions[request.action_digest.hash]
+
+    def update_action(self, request, context):
+        raw_action = self.blobs.get(request.action_digest.hash)
+        if raw_action is None:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Action absent from CAS")
+        action = re.Action.FromString(raw_action)
+        if action.command_digest.hash not in self.blobs:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Command absent from CAS")
+        self.actions[request.action_digest.hash] = request.action_result
+        return request.action_result
+
     def close(self):
         self.server.stop(0).wait()
 
@@ -137,7 +195,7 @@ def proxy(upstream, directory, rules=None, replay=None, sparse=False, extra=(), 
     directory.mkdir(parents=True, exist_ok=True)
     port = free_port()
     record = directory / "timeline.jsonl"
-    argv = [str(ROOT / "bin/rechaos"), "serve", "--port", str(port), "--upstream-host", upstream_host,
+    argv = [binary(), "serve", "--port", str(port), "--upstream-host", upstream_host,
         "--upstream-port", str(upstream), "--record", str(record), "--max-call-seconds", str(max_seconds), *extra]
     if rules is not None:
         path = directory / "policy.json"
@@ -176,7 +234,7 @@ def checker():
         with tempfile.TemporaryDirectory() as temp:
             with proxy(fixture.port, temp, replay=os.environ["RECHAOS_TIMELINE"], sparse=True) as (channel, observed, _):
                 data = contents(read(channel))
-                subprocess.run([str(ROOT/"bin/rechaos"),"verify-replay",os.environ["RECHAOS_TIMELINE"],str(observed)],check=True,capture_output=True)
+                subprocess.run([binary(),"verify-replay",os.environ["RECHAOS_TIMELINE"],str(observed)],check=True,capture_output=True)
                 verdict = {"verdict": "triggers", "signature": "fixture-torn-read"} if data != DATA else {"verdict": "does-not-trigger"}
         pathlib.Path(os.environ["RECHAOS_VERDICT"]).write_text(json.dumps(verdict))
     finally:
@@ -239,6 +297,33 @@ def main():
         with proxy(fixture.port, output / "write-truncate", [rule(WRITE,"request",{"kind":"truncate","keepBytes":1},messageIndex=1)]) as (channel, _, _):
             expect_status(grpc.StatusCode.INVALID_ARGUMENT, lambda: write(channel))
             passed("truncated Write is rejected by a verifying CAS")
+        with proxy(fixture.port, output / "write-corrupt", [rule(WRITE,"request",{"kind":"corrupt","bytes":4},messageIndex=1)]) as (channel, _, _):
+            expect_status(grpc.StatusCode.INVALID_ARGUMENT, lambda: write(channel))
+            passed("same-length corrupted Write is rejected by a verifying CAS")
+        with proxy(fixture.port, output / "read-corrupt", [rule(READ,"response",{"kind":"corrupt","bytes":4},messageIndex=1)]) as (channel, _, _):
+            corrupted = contents(read(channel))
+            assert len(corrupted) == len(DATA)
+            assert corrupted == bytes(b ^ 1 for b in DATA[:4]) + DATA[4:]
+            passed("Read corruption changes exactly the selected bytes without truncation")
+        for method, request, deserialize, expected_size in (
+            ("build.bazel.remote.execution.v2.ContentAddressableStorage/GetTree",
+             re.GetTreeRequest(instance_name="main", root_digest=re.Digest(hash="a" * 64, size_bytes=73)),
+             re.GetTreeResponse.FromString, 73),
+            ("build.bazel.remote.execution.v2.ActionCache/UpdateActionResult",
+             re.UpdateActionResultRequest(instance_name="main", action_digest=re.Digest(hash="b" * 64, size_bytes=19),
+                 action_result=re.ActionResult(output_files=[re.OutputFile(path="out", digest=re.Digest(hash="c" * 64, size_bytes=71))],
+                                               stdout_digest=re.Digest(hash="d" * 64, size_bytes=2))),
+             re.ActionResult.FromString, 73),
+        ):
+            with proxy(fixture.port, output / method.rsplit("/", 1)[1],
+                       [rule(method,"request",{"kind":"abort","status":"Unavailable"},
+                             minBlobBytes=expected_size, maxBlobBytes=expected_size)]) as (channel, _, _):
+                rpc = channel.unary_stream if method.endswith("/GetTree") else channel.unary_unary
+                call = rpc("/" + method, request_serializer=lambda msg: msg.SerializeToString(),
+                           response_deserializer=deserialize)
+                expect_status(grpc.StatusCode.UNAVAILABLE,
+                              lambda: list(call(request, timeout=5)) if method.endswith("/GetTree") else call(request, timeout=5))
+        passed("GetTree and UpdateActionResult blob-size targets decode request envelopes")
         with proxy(fixture.port, output / "truncate", [rule(READ,"response",{"kind":"truncate","keepBytes":7},messageIndex=1)]) as (channel, timeline, _):
             call = read(channel)
             torn = contents(call)
@@ -246,13 +331,13 @@ def main():
             clean, chaos = output / "clean-output", output / "chaos-output"
             clean.mkdir(exist_ok=True); chaos.mkdir(exist_ok=True)
             (clean / "artifact").write_bytes(DATA); (chaos / "artifact").write_bytes(torn)
-            oracle = subprocess.run([str(ROOT / "bin/rechaos"),"oracle",str(clean),str(chaos)], capture_output=True, text=True)
+            oracle = subprocess.run([binary(),"oracle",str(clean),str(chaos)], capture_output=True, text=True)
             assert oracle.returncode == 1, oracle.stderr
             (output / "oracle.json").write_text(oracle.stdout)
             passed("valid shortened Read ends OK; output oracle detects divergence")
         with proxy(fixture.port, output / "replay", replay=timeline) as (channel, recorded, _):
             assert contents(read(channel)) == torn
-            subprocess.run([str(ROOT/"bin/rechaos"),"verify-replay",str(timeline),str(recorded)],check=True,capture_output=True)
+            subprocess.run([binary(),"verify-replay",str(timeline),str(recorded)],check=True,capture_output=True)
             passed("recorded timeline reproduces torn read")
         with proxy(fixture.port, output / "mismatch", replay=timeline) as (channel, _, _):
             expect_status(grpc.StatusCode.FAILED_PRECONDITION, lambda: contents(read(channel,b"changed")))
@@ -282,14 +367,14 @@ def main():
         finally:
             restarting.close()
         minimal = output / "minimal.jsonl"
-        minimized = subprocess.run([str(ROOT / "bin/rechaos"),"minimize","--timeline",str(timeline),"--output",str(minimal),
-            "--check", f"{sys.executable} {ROOT / 'test/integration.py'} --checker", "--signature","fixture-torn-read"],capture_output=True,text=True,timeout=240)
+        minimized = subprocess.run([binary(),"minimize","--timeline",str(timeline),"--output",str(minimal),
+            "--check", shlex.join([sys.executable, str(ROOT / 'test/integration.py'), "--checker"]), "--signature","fixture-torn-read"],capture_output=True,text=True,timeout=240)
         assert minimized.returncode == 0, (minimized.stdout,minimized.stderr)
         (output / "minimize.json").write_text(minimized.stdout)
         assert len(minimal.read_text().splitlines()) == 1
         passed("end-to-end shrinking preserves a repeatedly observed failure signature")
         recomputed = output / "recomputed.jsonl"
-        subprocess.run([str(ROOT / "bin/rechaos"),"schedule","--policy",str(output / "truncate/policy.json"),
+        subprocess.run([binary(),"schedule","--policy",str(output / "truncate/policy.json"),
             "--trace",str(timeline),"--output",str(recomputed)], check=True)
         assert [json.loads(x) for x in timeline.read_text().splitlines()] == [json.loads(x) for x in recomputed.read_text().splitlines()]
         passed("offline seed + recorded trace exactly reproduces decisions")

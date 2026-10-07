@@ -221,7 +221,7 @@ class ManagedProcess:
         else) is reported as EXITED; otherwise PAUSED is sticky because a
         SIGSTOP'd process does not report exit via poll().
         """
-        if self._proc is not None and self._state is not ProcessState.PAUSED:
+        if self._proc is not None:
             if self._proc.poll() is not None:
                 self._set_state(ProcessState.EXITED, "observe",
                                 detail=f"exitcode={self._proc.returncode}")

@@ -6,9 +6,9 @@ This harness asks a complementary, vendor-grade question: "do *these N*
 endpoints behave the **same**?". It runs one deterministic probe battery against
 every configured REAPI endpoint, normalizes each response to an
 implementation-independent *observation*, and diffs the observations
-probe-by-probe. Where all endpoints agree, the probe is conformant. Where they
-disagree, the harness emits a structured divergence witness — exactly the
-artifact a vendor uses to say "we conform and competitor X diverges".
+probe-by-probe. Agreement means the normalized observations match on these
+probes. Disagreement yields a structured witness; it does not by itself
+identify a protocol defect or prove full interchangeability.
 
 Observable-equivalence model (see docs/differential.md)
 -------------------------------------------------------
@@ -26,15 +26,15 @@ entitled to rely on:
   * Action Cache presence/absence and (on a hit) the ActionResult's exit_code
     and the digests of its referenced blobs.
 
-Everything the harness touches is deterministic in `--seed`: blob contents,
-AC action digests, and the probe order are all derived from the seed, so two
-runs against the same fleet produce identical observations (and therefore an
-identical verdict), and a divergence is reproducible.
+The seed, sizes, instance, and run id reconstruct request content and probe
+order. Responses also depend on backend state, scheduling, eviction, and
+transport. Retain the report and fault timelines; a seed alone does not
+reproduce observations or a divergence.
 
 This is BOTH a library and a CLI:
 
   * Library: construct `DifferentialHarness(endpoints, seed=...)`, call
-    `.run()` -> `Report`. `Report.verdict` is "agree" or "diverge".
+    `.run()` -> `Report`. `Report.verdict` is "agree", "diverge", or "error" (incomplete comparison).
   * CLI: `reapi_differential.py --endpoint host:port --endpoint host:port ...`
     prints a human summary (and `--json` a machine report). Exit code is 0 on
     full agreement, 2 on any divergence, 1 on operational error.
@@ -54,6 +54,8 @@ import pathlib
 import runpy
 import sys
 import traceback
+
+from reapi_values import action_observation
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -122,7 +124,7 @@ def normalize_missing(result: dict) -> dict:
     """
     obs = {"status": _status(result)}
     if obs["status"] == "OK":
-        obs["missing"] = sorted(f"{d['hash']}/{d['size']}" for d in result.get("missing", []))
+        obs["missing"] = sorted({f"{d['hash']}/{d['size']}" for d in result.get("missing", [])})
     return obs
 
 
@@ -132,6 +134,8 @@ def normalize_ac(result: dict) -> dict:
     if obs["status"] == "OK":
         obs["exitCode"] = result.get("exitCode")
         obs["outputDigests"] = sorted(result.get("outputDigests", []))
+        if "result" in result:
+            obs["result"] = result["result"]
     return obs
 
 
@@ -162,14 +166,39 @@ def _measured(fn):
         return {"status": error.code().name, "details": (error.details() or "")[:400]}
 
 
+def ac_metadata(blob, instance):
+    """Valid content-addressed Command, input root, and Action for the AC probe."""
+    def wrap(label, message):
+        result = Blob.__new__(Blob)
+        result.label = label
+        result.data = message.SerializeToString(deterministic=True)
+        result.hash = hashlib.sha256(result.data).hexdigest()
+        result.size = len(result.data)
+        result.instance = instance
+        result.read_name = f"{instance}/blobs/{result.hash}/{result.size}"
+        return result
+    command = wrap("diff-command", re.Command(arguments=["/bin/true", blob.hash], output_paths=["out"]))
+    root = wrap("diff-root", re.Directory())
+    action = wrap("diff-action", re.Action(
+        command_digest=re.Digest(hash=command.hash, size_bytes=command.size),
+        input_root_digest=re.Digest(hash=root.hash, size_bytes=root.size)))
+    return command, root, action
+
+
 def ac_action_digest(blob, instance):
-    """Deterministic *action* digest for an AC entry keyed off ``blob``."""
-    raw = hashlib.sha256(f"action/{blob.hash}".encode()).hexdigest()
-    return re.Digest(hash=raw, size_bytes=max(1, blob.size % 256))
+    action = ac_metadata(blob, instance)[-1]
+    return re.Digest(hash=action.hash, size_bytes=action.size)
 
 
 def ac_update(endpoint, blob, instance):
     """Put an ActionResult referencing ``blob`` as an output file."""
+    # REAPI requires the Action and Command to be in CAS before an AC update.
+    for metadata in ac_metadata(blob, instance):
+        written = endpoint.write(metadata, writer="diff-metadata")
+        if written["status"] != "OK":
+            return written
+        if written.get("committedBytes") != metadata.size:
+            raise ValueError("AC prerequisite upload returned the wrong committed size")
     _, update = _ac_rpcs(endpoint)
 
     def perform():
@@ -187,7 +216,7 @@ def ac_update(endpoint, blob, instance):
             ),
             timeout=8,
         )
-        return {"exitCode": reply.exit_code}
+        return action_observation(reply)
 
     return _measured(perform)
 
@@ -205,10 +234,7 @@ def ac_get(endpoint, blob, instance):
             ),
             timeout=8,
         )
-        return {
-            "exitCode": reply.exit_code,
-            "outputDigests": [f"{f.digest.hash}/{f.digest.size_bytes}" for f in reply.output_files],
-        }
+        return action_observation(reply)
 
     return _measured(perform)
 
@@ -229,9 +255,8 @@ def build_probes(blobs, absent_blob, instance):
     """The deterministic probe battery, in a fixed (seed-independent) order.
 
     Covers: write roundtrips across sizes, read-back, range reads, missing-blob
-    sets (present and absent), QueryWriteStatus, and AC put/get. Every probe is
-    pure w.r.t. the deterministic blobs, so re-running yields the same
-    observations on a conforming endpoint.
+    sets (present and absent), QueryWriteStatus, and AC put/get. Requests are
+    deterministic for fixed inputs; observations depend on the endpoint.
     """
     probes = []
     for blob in blobs:
@@ -319,14 +344,16 @@ class Report:
     endpoints: list
     sizes: list
     probes: list                # list[ProbeResult]
-    verdict: str                # "agree" | "diverge"
+    verdict: str                # "agree" | "diverge" | "error"
     divergences: int
+    run_id: str
 
     def to_dict(self):
         return {
             "tool": "reapi_differential",
             "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "seed": self.seed,
+            "runId": self.run_id,
             "instance": self.instance,
             "endpoints": self.endpoints,
             "sizes": self.sizes,
@@ -355,8 +382,8 @@ class DifferentialHarness:
         self.seed = seed
         self.instance = instance
         self.sizes = [int(s) for s in sizes]
-        if any(s < 1 for s in self.sizes):
-            raise ValueError("sizes must be positive")
+        if not self.sizes or any(s < 1 for s in self.sizes):
+            raise ValueError("sizes must be a nonempty list of positive integers")
         # run_id is folded into blob content; fixing it keeps the fleet consistent
         # within a run while staying deterministic across runs (seed-derived).
         self.run_id = run_id or f"differential/{seed}"
@@ -369,17 +396,30 @@ class DifferentialHarness:
     def run(self):
         blobs, absent = self._blobs()
         probes = build_probes(blobs, absent, self.instance)
-        endpoints = {addr: Endpoint(addr) for addr in self.addresses}
+        # Each occurrence is an independent connection and observation, including
+        # duplicate addresses used to check repeatability. Unique addresses keep
+        # their existing JSON keys; repetitions receive an occurrence suffix.
+        labels = [f"{addr}#{i + 1}" if self.addresses.count(addr) > 1 else addr
+                  for i, addr in enumerate(self.addresses)]
+        endpoints = []
         try:
+            for label, addr in zip(labels, self.addresses):
+                endpoints.append((label, Endpoint(addr)))
             probe_results = []
+            operational_error = False
             for probe in probes:
                 observations = {}
-                for addr, endpoint in endpoints.items():
+                for addr, endpoint in endpoints:
                     try:
                         raw = probe.run(endpoint)
                         observations[addr] = probe.normalize(raw)
                     except Exception as error:  # operational failure for this probe/endpoint
                         observations[addr] = {"status": "HARNESS_ERROR", "error": str(error)[:400]}
+                    if observations[addr].get("status") in {
+                        "HARNESS_ERROR", "UNKNOWN", "UNAVAILABLE", "DEADLINE_EXCEEDED",
+                        "CLIENT_CANCELLED", "CANCELLED",
+                    }:
+                        operational_error = True
                 probe_results.append(self._diff(probe.name, observations))
             diverged = [p for p in probe_results if not p.agree]
             return Report(
@@ -388,11 +428,12 @@ class DifferentialHarness:
                 endpoints=self.addresses,
                 sizes=self.sizes,
                 probes=probe_results,
-                verdict="diverge" if diverged else "agree",
+                verdict="error" if operational_error else ("diverge" if diverged else "agree"),
                 divergences=len(diverged),
+                run_id=self.run_id,
             )
         finally:
-            for endpoint in endpoints.values():
+            for _, endpoint in endpoints:
                 try:
                     endpoint.channel.close()
                 except Exception:
@@ -436,7 +477,8 @@ def render_human(report: Report) -> str:
                 obs = json.dumps(group["observation"], sort_keys=True)
                 lines.append(f"         {eps}: {obs}")
     lines.append(bar)
-    verdict = "AGREE (observably equivalent)" if report.verdict == "agree" else "DIVERGE"
+    verdict = {"agree": "AGREE (on the recorded probes)", "diverge": "DIVERGE",
+               "error": "ERROR (comparison incomplete)"}[report.verdict]
     lines.append(f"VERDICT: {verdict}")
     lines.append(bar)
     return "\n".join(lines)
@@ -488,7 +530,7 @@ def main(argv=None):
         return 1
 
     if not args.quiet:
-        print(render_human(report))
+        print(render_human(report), file=sys.stderr if args.json_out == "-" else sys.stdout)
     if args.json_out:
         payload = json.dumps(report.to_dict(), indent=2) + "\n"
         if args.json_out == "-":
@@ -498,7 +540,7 @@ def main(argv=None):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(payload)
 
-    return 2 if report.verdict == "diverge" else 0
+    return {"agree": 0, "diverge": 2, "error": 1}[report.verdict]
 
 
 if __name__ == "__main__":
