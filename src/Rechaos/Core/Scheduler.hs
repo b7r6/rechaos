@@ -125,13 +125,13 @@ validateTimeline = go M.empty
   (via 'sameEvent'), or replay fails.
 -}
 replayDecision :: Bool -> M.Map EventKey Decision -> Event -> Either Text Decision
-replayDecision sparse timeline e = case M.lookup (eventKey e) timeline of
-  Nothing
-    | sparse -> Right (Decision e Nothing)
-    | otherwise -> Left (T.pack "event missing from replay timeline")
-  Just d
-    | sameEvent (event d) e -> Right (Decision e (injection d))
-    | otherwise -> Left (T.pack "replay fingerprint mismatch")
+replayDecision sparse timeline e
+  | Just d <- recorded, sameEvent (event d) e = Right (Decision e (injection d))
+  | Just _ <- recorded = Left (T.pack "replay fingerprint mismatch")
+  | sparse = Right (Decision e Nothing)
+  | otherwise = Left (T.pack "event missing from replay timeline")
+ where
+  recorded = M.lookup (eventKey e) timeline
 
 -- Total even for an invalid constructor supplied by another Haskell caller.
 
@@ -214,9 +214,13 @@ verifyReplay expected observed = do
   actual <- validateTimeline observed
   mapM_ (check actual) (M.elems wanted)
  where
-  check actual d = case M.lookup (eventKey (event d)) actual of
-    Just found | sameEvent (event d) (event found) && injection d == injection found -> Right ()
-    _ -> Left (T.pack "replay incomplete or changed: " <> T.pack (show (eventKey (event d))))
+  check actual d
+    | Just found <- M.lookup (eventKey (event d)) actual
+    , sameEvent (event d) (event found)
+    , injection d == injection found =
+        Right ()
+    | otherwise =
+        Left (T.pack "replay incomplete or changed: " <> T.pack (show (eventKey (event d))))
 
 -- A full recording must agree in BOTH directions: no required event missing or
 -- changed (the forward check) AND no spurious injected decision in the observed

@@ -48,17 +48,19 @@ import System.Timeout qualified as Timeout
 
 -- | Map a core 'Status' onto the grapesy @grpc-status@ error it injects.
 grpcStatus :: Status -> GrpcError
-grpcStatus s = case s of
-  Cancelled -> GrpcCancelled
-  InvalidArgument -> GrpcInvalidArgument
-  DeadlineExceeded -> GrpcDeadlineExceeded
-  NotFound -> GrpcNotFound
-  ResourceExhausted -> GrpcResourceExhausted
-  FailedPrecondition -> GrpcFailedPrecondition
-  Internal -> GrpcInternal
-  Unavailable -> GrpcUnavailable
-  DataLoss -> GrpcDataLoss
+grpcStatus Cancelled = GrpcCancelled
+grpcStatus InvalidArgument = GrpcInvalidArgument
+grpcStatus DeadlineExceeded = GrpcDeadlineExceeded
+grpcStatus NotFound = GrpcNotFound
+grpcStatus ResourceExhausted = GrpcResourceExhausted
+grpcStatus FailedPrecondition = GrpcFailedPrecondition
+grpcStatus Internal = GrpcInternal
+grpcStatus Unavailable = GrpcUnavailable
+grpcStatus DataLoss = GrpcDataLoss
 
+{- | Wrap a 'GrpcError' and a human-readable detail string into a 'GrpcException'
+with no trailing metadata; the internal injection vehicle for every fault.
+-}
 grpcException :: GrpcError -> Text -> GrpcException
 grpcException s msg = GrpcException s (Just msg) Nothing []
 
@@ -86,17 +88,18 @@ handler runtime connection maxSeconds = S.someRpcHandler $
           params = def{C.callRequestMetadata = metadata, C.callTimeout = Just upstreamTimeout}
       done <- withIsolatedFailure connection params (Proxy @(Wire service method)) $ \upstream -> Timeout.timeout budget $ do
         size <- newIORef Nothing
-        let apply direction index bytes send = do
-              if direction == Request
-                then case blobSize method bytes of
-                  Just n -> writeIORef size (Just n)
-                  Nothing -> pure ()
-                else pure ()
+        let rememberRequestSize direction bytes
+              -- n.b. the blob size is latched from request-side frames only; response
+              -- frames never update it (ByteStream.Write carries the size, reads do not).
+              | Request <- direction, Just n <- blobSize method bytes = writeIORef size (Just n)
+              | otherwise = pure ()
+            apply direction index bytes send = do
+              rememberRequestSize direction bytes
               currentSize <- readIORef size
               chosen <-
                 decide runtime method occurrence started direction index currentSize bytes
                   >>= either (throwIO . grpcException GrpcFailedPrecondition) pure
-              case chosen of
+              case chosen of -- CASE-OK: dispatch over the fault algebra produced mid-pump; each arm sequences distinct transport effects
                 Nothing -> send bytes >> pure False
                 Just (Delay micros) -> sleepMicros micros >> send bytes >> pure False
                 Just (Abort status) -> throwIO (grpcException (grpcStatus status) "rechaos injected abort")
@@ -135,7 +138,7 @@ handler runtime connection maxSeconds = S.someRpcHandler $
                   send corrupted >> pure False
             pumpInput index = do
               item <- S.recvInput downstream
-              case item of
+              case item of -- CASE-OK: three-armed match on a freshly-received StreamElem; no argument to pattern-match in the head
                 NoMoreElems NoMetadata -> C.sendEndOfInput upstream
                 StreamElem bytes -> do
                   stop <- apply Request index bytes (C.sendNextInput upstream)
@@ -145,7 +148,7 @@ handler runtime connection maxSeconds = S.someRpcHandler $
                   C.sendEndOfInput upstream
             pumpOutput index = do
               item <- C.recvOutput upstream
-              case item of
+              case item of -- CASE-OK: three-armed match on a freshly-received StreamElem; no argument to pattern-match in the head
                 NoMoreElems trailers -> S.sendTrailers downstream trailers
                 StreamElem bytes -> do
                   stop <- apply Response index bytes (S.sendNextOutput downstream)
@@ -155,7 +158,7 @@ handler runtime connection maxSeconds = S.someRpcHandler $
                   S.sendTrailers downstream (if stop then [] else trailers)
             responses = do
               md <- C.recvResponseMetadata upstream
-              case md of
+              case md of -- CASE-OK: two-armed match on freshly-received response metadata produced mid-expression
                 ResponseInitialMetadata initial -> do
                   S.setResponseInitialMetadataAndTrailers downstream initial Nothing
                   pumpOutput 1
@@ -164,19 +167,21 @@ handler runtime connection maxSeconds = S.someRpcHandler $
         -- keep reading responses. Either failure cancels its sibling and upstream.
         withAsync (pumpInput 1) $ \input -> withAsync responses $ \output -> do
           first <- waitEitherCatch input output
-          case first of
+          case first of -- CASE-OK: four-way match on the nested Either from waitEitherCatch; each arm has distinct cancel/wait/rethrow behavior
             Left (Right ()) -> wait output
             Left (Left e) -> throwIO e
             Right (Right ()) -> cancel input
             Right (Left e) -> throwIO e
-      case done of
+      -- n.b. 'Nothing' here is the System.Timeout verdict (budget exhausted), mapped
+      -- to a gRPC DEADLINE_EXCEEDED; it is distinct from any upstream deadline status.
+      case done of -- CASE-OK: timeout sentinel (Nothing = budget blown) read once at the join point
         Nothing -> throwIO (grpcException GrpcDeadlineExceeded "rechaos call deadline")
         Just () -> pure ()
-    case result of
+    case result of -- CASE-OK: success/failure split on the top-level try, each arm logs a distinct outcome before returning or rethrowing
       Right () -> logOutcome runtime method occurrence started "OK"
       Left (e :: SomeException) -> do
         -- Preserve gRPC status, details and trailing metadata verbatim.
-        case fromException e of
+        case fromException e of -- CASE-OK: narrow SomeException to GrpcException; both arms log then forward or rethrow
           Just grpc -> do
             logOutcome runtime method occurrence started (T.pack (show (grpcError grpc)))
             S.sendGrpcException downstream grpc
@@ -199,14 +204,16 @@ withIsolatedFailure connection params proxy action = do
     result <- try (action call)
     writeIORef saved (Just (result :: Either SomeException a))
   result <- readIORef saved
-  case result of
+  -- n.b. a GrpcCancelled from the transport is expected and swallowed: it is the
+  -- normal teardown of the stream we deliberately cancelled, not a real failure.
+  case result of -- CASE-OK: reconcile the saved action result against the bracket's transport outcome; pattern guards select the one survivor
     Just (Left e) -> throwIO e
-    Just (Right value) -> case transport of
+    Just (Right value) -> case transport of -- CASE-OK: action succeeded; keep its value unless the transport failed for a reason other than our cancel
       Right () -> pure value
       Left e
         | Just grpc <- fromException e, grpcError grpc == GrpcCancelled -> pure value
         | otherwise -> throwIO (e :: SomeException)
-    Nothing -> case transport of
+    Nothing -> case transport of -- CASE-OK: no saved result; surface the transport error or flag the impossible missing-result path
       Left e -> throwIO (e :: SomeException)
       Right () -> throwIO (grpcException GrpcInternal "missing RPC result")
 

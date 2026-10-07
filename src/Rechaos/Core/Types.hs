@@ -281,8 +281,8 @@ data Policy = Policy
   }
   deriving (Eq, Show)
 
--- An event is an observation supplied by the shell, never a clock read.
--- Occurrences are 1-based per method; message indices are 1-based per direction.
+-- n.b. an event is an observation supplied by the shell, never a clock read;
+-- occurrences are 1-based per method and message indices are 1-based per direction.
 
 {- | A single observation handed to the core by the shell. It is never a clock
   read taken here; every field is reported from the outside world.
@@ -335,7 +335,7 @@ type EventKey = (Text, Natural, Direction, Natural)
 eventKey :: Event -> EventKey
 eventKey e = (eMethod e, eOccurrence e, eDirection e, eMessageIndex e)
 
--- Arrival time may vary during live replay. All other observations must agree.
+-- n.b. arrival time may vary during live replay; all other observations must agree.
 
 {- | The identity-significant projection of an 'Event' used by 'sameEvent':
   every field /except/ 'eElapsedMicros', in the tuple shape

@@ -48,6 +48,11 @@ instance (KnownSymbol s, KnownSymbol m) => IsRPC (Wire s m) where
   rpcServiceName _ = B.pack (symbolVal (Proxy @s))
   rpcMethodName _ = B.pack (symbolVal (Proxy @m))
   rpcMessageType _ = Nothing
+
+-- n.b. serialize/deserialize are identity on both sides on purpose: the proxy
+-- relays payloads byte-for-byte, so unknown protobuf fields survive the hop.
+-- Introducing any decode/re-encode here would silently drop unrecognized
+-- fields and break the passthrough guarantee this transport exists to provide.
 instance (KnownSymbol s, KnownSymbol m) => SupportsClientRpc (Wire s m) where
   rpcSerializeInput _ = id
   rpcDeserializeOutput _ = Right

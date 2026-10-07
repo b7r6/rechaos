@@ -57,31 +57,32 @@ snapshot root = do
  where
   walk relative absolute = do
     before <- getSymbolicLinkStatus absolute
-    entry <-
-      if isSymbolicLink before
-        then
-          Symlink . T.pack <$> readSymbolicLink absolute
-        else
-          if isDirectory before
-            then pure Directory
-            else
-              if isRegularFile before
-                then withBinaryFile absolute ReadMode $ \h -> do
-                  bytes <- L.hGetContents h
-                  let digest = sha256 bytes
-                  _ <- evaluate (T.length digest)
-                  pure (File digest (fromIntegral (fileSize before)) (fileMode before .&. 0o111 /= 0))
-                else fail ("unsupported output node: " ++ absolute)
-    children <-
-      if isDirectory before
-        then do
-          names <- sort <$> listDirectory absolute
-          concat
-            <$> forM names (\name -> walk (if null relative then name else relative </> name) (absolute </> name))
-        else pure []
+    entry <- hashEntry absolute before
+    children <- hashChildren relative absolute before
+    -- n.b. re-stat after the walk and bail if any identity/size/mode/mtime
+    -- field moved: this is how a mid-traversal mutation is caught, since the
+    -- snapshot is not atomic.
     after <- getSymbolicLinkStatus absolute
     unless (stable before after) $ fail ("output changed while hashing: " ++ absolute)
     pure ((T.pack relative, entry) : children)
+  -- Classify a node from its already-fetched 'before' status. Pattern guards
+  -- rather than nested if/then/else: each file kind reads as its own clause.
+  hashEntry absolute before
+    | isSymbolicLink before = Symlink . T.pack <$> readSymbolicLink absolute
+    | isDirectory before = pure Directory
+    | isRegularFile before = withBinaryFile absolute ReadMode $ \h -> do
+        bytes <- L.hGetContents h
+        let digest = sha256 bytes
+        _ <- evaluate (T.length digest)
+        pure (File digest (fromIntegral (fileSize before)) (fileMode before .&. 0o111 /= 0))
+    | otherwise = fail ("unsupported output node: " ++ absolute)
+  -- Recurse into directories (sorted for determinism); leaves have no children.
+  hashChildren relative absolute before
+    | isDirectory before = do
+        names <- sort <$> listDirectory absolute
+        concat
+          <$> forM names (\name -> walk (if null relative then name else relative </> name) (absolute </> name))
+    | otherwise = pure []
   stable a b =
     fileID a == fileID b
       && deviceID a == deviceID b

@@ -99,7 +99,9 @@ equivalent a b = null (diff a b)
   non-success on either side 'Inconclusive'.
 -}
 compareBuilds :: BuildResult -> BuildResult -> Verdict
-compareBuilds (Built a) (Built b) = case diff a b of
-  [] -> Equivalent
-  changes -> Diverged changes
+compareBuilds (Built a) (Built b)
+  | null changes = Equivalent
+  | otherwise = Diverged changes
+ where
+  changes = diff a b
 compareBuilds _ _ = Inconclusive

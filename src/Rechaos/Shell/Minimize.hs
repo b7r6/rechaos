@@ -84,14 +84,15 @@ minimizeTimeline input output command signature repetitions timeoutSeconds maxTr
                 , std_err = UseHandle logHandle
                 }
               $ \_ _ _ process -> do
+                -- n.b. a timeout leaves the whole process group alive; kill it (not just
+                -- the leader) and reap so a hung checker cannot leak into the next trial.
+                let onTimeout = do
+                      pid <- getPid process
+                      maybe (pure ()) (\p -> signalProcessGroup sigKILL p `catch` ignoreIO) pid
+                      _ <- waitForProcess process
+                      pure Nothing
                 result <- Timeout.timeout (timeoutSeconds * 1000000) (waitForProcess process)
-                case result of
-                  Just code -> pure (Just code)
-                  Nothing -> do
-                    pid <- getPid process
-                    maybe (pure ()) (\p -> signalProcessGroup sigKILL p `catch` ignoreIO) pid
-                    _ <- waitForProcess process
-                    pure Nothing
+                maybe onTimeout (pure . Just) result
           if result /= Just ExitSuccess
             then pure M.Unknown
             else do
@@ -99,18 +100,17 @@ minimizeTimeline input output command signature repetitions timeoutSeconds maxTr
               let parsed =
                     decode bytes
                       >>= parseMaybe (withObject "checker verdict" $ \o -> (,) <$> o .: "verdict" <*> o .:? "signature")
-              pure $ case parsed of
-                Just ("triggers" :: Text, Just found) | found == signature -> M.Triggers
-                Just ("does-not-trigger", _) -> M.DoesNotTrigger
-                _ -> M.Unknown
-        loop n uncertain state = case M.candidate state of
-          Nothing -> pure (if uncertain then "inconclusive" else "complete", state)
-          Just ds
-            | n >= maxTrials -> pure ("trial-limit", state)
-            | otherwise -> do
-                v <- test ds
-                let uncertain' = v /= M.Triggers && (uncertain || v == M.Unknown)
-                loop (n + 1) uncertain' (M.observe v state)
+              pure (classifyVerdict parsed)
+        loop n uncertain state
+          | Nothing <- M.candidate state = pure (if uncertain then "inconclusive" else "complete", state)
+          | n >= maxTrials = pure ("trial-limit", state)
+          | Just ds <- M.candidate state = do
+              v <- test ds
+              -- n.b. uncertainty latches: once a trial is Unknown (or any non-Triggers)
+              -- the run can only ever settle as "inconclusive", never "complete".
+              let uncertain' = v /= M.Triggers && (uncertain || v == M.Unknown)
+              loop (n + 1) uncertain' (M.observe v state)
+          | otherwise = pure (if uncertain then "inconclusive" else "complete", state)
     baseline <- test original
     unless (baseline == M.Triggers) $
       fail "initial timeline did not repeatedly reproduce the requested signature"
@@ -132,3 +132,11 @@ minimizeTimeline input output command signature repetitions timeoutSeconds maxTr
  where
   ignoreIO :: IOException -> IO ()
   ignoreIO _ = pure ()
+  -- Map a parsed checker verdict to the core three-way judgement. n.b. a
+  -- "triggers" that does not carry the requested @signature@ is deliberately
+  -- demoted to 'M.Unknown', never 'M.Triggers' — only an exact signature match
+  -- may advance the witness. Anything unparseable or unrecognized is 'M.Unknown'.
+  classifyVerdict :: Maybe (Text, Maybe Text) -> M.Verdict
+  classifyVerdict (Just ("triggers", Just found)) | found == signature = M.Triggers
+  classifyVerdict (Just ("does-not-trigger", _)) = M.DoesNotTrigger
+  classifyVerdict _ = M.Unknown
