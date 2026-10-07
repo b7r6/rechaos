@@ -1,13 +1,25 @@
 {
   description = "rechaos: standalone Haskell REAPI chaos gateway with a pure replay/oracle core";
   inputs.nixpkgs.url = "github:sensenet-ai/nixpkgs/ddb5e98374d1f16c86ecd70d9c4e2d6c6a5e8dbc";
-  outputs = { self, nixpkgs }:
+  # lean4-nix (Leni Aniva): readToolchainFile pins the exact Lean named in
+  # lean/lean-toolchain, so CI builds the proof gate with the same Lean that
+  # local elan and lean4fmt use. Pinned to the rev lean4fmt also uses.
+  inputs.lean4-nix.url = "github:lenianiva/lean4-nix/1ac326fe8e88796156906b0ad8272364f01a7cdc";
+  inputs.lean4-nix.inputs.nixpkgs.follows = "nixpkgs";
+  outputs = { self, nixpkgs, lean4-nix }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       eachSystem = nixpkgs.lib.genAttrs systems;
       build = system:
         let
           pkgs = import nixpkgs { inherit system; };
+          # The Lean toolchain for the proof gate, pinned by lean/lean-toolchain
+          # through lean4-nix's overlay (replaces pkgs.lean). `lean.lean-all`
+          # bundles lean + lake at that exact version.
+          leanPkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (lean4-nix.readToolchainFile ./lean/lean-toolchain) ];
+          };
           toolchain = import ./nix/toolchain.nix { inherit pkgs; };
           python = pkgs.python3.withPackages (p: [ p.grpcio p.grpcio-tools p.protobuf ]);
           # Single source of truth: one cabal package compiling the proto
@@ -108,7 +120,7 @@
             latexmk -pdf -interaction=nonstopmode -halt-on-error rechaos.tex
             install -Dm444 rechaos.pdf "$out/rechaos.pdf"
           '';
-        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc paper; };
+        in { inherit pkgs leanPkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc paper; };
     in {
       packages = eachSystem (system:
         let b = build system;
@@ -234,14 +246,14 @@
           # Paper gate: the LaTeX source must compile to a PDF (catches broken
           # refs, bib keys, and malformed markup before review).
           paper = b.paper;
-          # Proof gate: the Lean 4 verified core must compile under Lean 4.30
-          # with zero proof holes. We copy ./lean into a writable tree (lake
-          # writes .lake/), and run `lake build` fully offline
-          # — no Mathlib, no network, pkgs.lean4 supplies the toolchain. The
-          # Source guard rejects proof-hole terms and new axiom declarations,
-          # ignoring documentation comments and string literals.
+          # Proof gate: the Lean 4 verified core must compile under the Lean
+          # pinned by lean/lean-toolchain (via lean4-nix) with zero proof holes.
+          # We copy ./lean into a writable tree (lake writes .lake/), and run
+          # `lake build` fully offline — no Mathlib, no network. The Source guard
+          # rejects proof-hole terms and new axiom declarations, ignoring
+          # documentation comments and string literals.
           lean = b.pkgs.runCommand "rechaos-lean" {
-            nativeBuildInputs = [ b.pkgs.lean4 b.python ];
+            nativeBuildInputs = [ b.leanPkgs.lean.lean-all b.python ];
           } ''
             cp -r ${./lean} ./lean
             chmod -R u+w ./lean
