@@ -85,7 +85,30 @@
               ./examples ./proto ./CHANGELOG.md ./README.md ./LICENSE ./scripts/build.sh
             ];
           };
-        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc; };
+          # The OSDI-style paper sources (LaTeX + bib only; the Makefile is a
+          # convenience wrapper for the same latexmk invocation used here).
+          paperSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./paper/rechaos.tex ./paper/refs.bib ];
+          };
+          # TeX Live closure for the paper build. scheme-medium carries latexmk,
+          # natbib/plainnat, mathtools, microtype, listings, hyperref, and the
+          # T1/EC Computer Modern fonts; enumitem and titlesec are layered on
+          # (not in scheme-medium) for the paper's list and heading formatting.
+          paperTex = pkgs.texlive.combine {
+            inherit (pkgs.texlive) scheme-medium enumitem titlesec;
+          };
+          paper = pkgs.runCommand "rechaos-paper" {
+            nativeBuildInputs = [ paperTex ];
+          } ''
+            cp -r ${paperSrc}/paper ./paper
+            chmod -R u+w ./paper
+            cd ./paper
+            export HOME="$TMPDIR"
+            latexmk -pdf -interaction=nonstopmode -halt-on-error rechaos.tex
+            install -Dm444 rechaos.pdf "$out/rechaos.pdf"
+          '';
+        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc paper; };
     in {
       packages = eachSystem (system:
         let b = build system;
@@ -93,6 +116,8 @@
           default = b.package;
           # The rendered Haddock HTML as a browsable artifact.
           docs = b.docsPackage.doc;
+          # The compiled paper: `nix build .#paper` -> result/rechaos.pdf.
+          paper = b.paper;
         });
       # `nix run .# -- serve ...` runs the shipped executable. The cabal stanza
       # names it `rechaos`, matching the result symlink's bin/rechaos.
@@ -206,6 +231,9 @@
           '';
           # Metadata check and sdist creation; test and docs consume this archive.
           cabalCheck = b.sourceArchive;
+          # Paper gate: the LaTeX source must compile to a PDF (catches broken
+          # refs, bib keys, and malformed markup before review).
+          paper = b.paper;
           # Proof gate: the Lean 4 verified core must compile under Lean 4.30
           # with zero proof holes. We copy ./lean into a writable tree (lake
           # writes .lake/), and run `lake build` fully offline
