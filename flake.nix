@@ -22,7 +22,9 @@
           # strips docs. Reused for the shipped executable and for the
           # haddock-enabled doc derivation below.
           rawPackage = pkgs.haskell.lib.allowInconsistentDependencies
-            (toolchain.hp.callCabal2nix "rechaos" ./. {});
+            (pkgs.haskell.lib.overrideCabal
+              (toolchain.hp.callCabal2nix "rechaos" cabalSrc {})
+              (_: { src = sourceArchive; }));
           package = pkgs.haskell.lib.justStaticExecutables rawPackage;
           # Same package with Haddock generation forced on. Building this
           # derivation fails on any haddock error, which is exactly the
@@ -34,7 +36,10 @@
           # hand-written stanzas (the generated/ tree is deliberately excluded).
           haskellSrc = pkgs.lib.fileset.toSource {
             root = ./.;
-            fileset = pkgs.lib.fileset.unions [ ./app ./src ./test ./fourmolu.yaml ./.hlint.yaml ];
+            fileset = pkgs.lib.fileset.unions [
+              ./Setup.hs ./app ./src ./test ./scripts/gen-conformance.hs
+              ./fourmolu.yaml ./.hlint.yaml
+            ];
           };
           # Source tree for `cabal check`: the cabal file plus everything it
           # references via extra-source-files, so the check sees a faithful,
@@ -42,11 +47,45 @@
           cabalSrc = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
-              ./rechaos.cabal ./app ./src ./test ./generated
+              ./rechaos.cabal ./Setup.hs ./app ./src ./test ./generated
               ./examples ./proto ./CHANGELOG.md ./README.md ./LICENSE
             ];
           };
-        in { inherit pkgs toolchain python package docsPackage haskellSrc cabalSrc; };
+          # Build and test the actual source distribution, so omitted runtime
+          # fixtures or modules fail the same gate as an ordinary source build.
+          sourceArchive = pkgs.runCommand "rechaos-source.tar.gz" {
+            nativeBuildInputs = [ pkgs.cabal-install ];
+          } ''
+            cp -r ${cabalSrc} ./source
+            chmod -R u+w ./source
+            cd ./source
+            cabal check
+            touch "$TMPDIR/cabal.config"
+            cabal --config-file="$TMPDIR/cabal.config" sdist --output-directory="$TMPDIR/sdist"
+            cp "$TMPDIR/sdist/rechaos-0.1.0.0.tar.gz" "$out"
+          '';
+          pythonSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./scripts ./test ./proto ./examples ];
+          };
+          conformanceSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./src ./scripts/gen-conformance.hs ./test/golden ./lean
+            ];
+          };
+          protoSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./proto ./generated ./scripts/generate-protos.sh ];
+          };
+          devSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./rechaos.cabal ./Setup.hs ./app ./src ./test ./generated
+              ./examples ./proto ./CHANGELOG.md ./README.md ./LICENSE ./scripts/build.sh
+            ];
+          };
+        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc; };
     in {
       packages = eachSystem (system:
         let b = build system;
@@ -63,6 +102,7 @@
           default = {
             type = "app";
             program = "${b.package}/bin/rechaos";
+            meta.description = "REAPI chaos gateway and replay/oracle tools";
           };
         });
       # `nix fmt` formats the hand-written sources in place. The fourmolu flag
@@ -74,7 +114,7 @@
           name = "rechaos-fmt";
           runtimeInputs = [ b.pkgs.haskellPackages.fourmolu ];
           text = ''
-            fourmolu --mode inplace -o -XImportQualifiedPost app src test
+            fourmolu --mode inplace -o -XImportQualifiedPost Setup.hs app src test scripts/gen-conformance.hs
           '';
         });
       checks = eachSystem (system:
@@ -83,13 +123,69 @@
           # The cabal test-suite (QuickCheck core properties), built and run by
           # the same derivation that produces the executable.
           test = b.package;
+          # Exercise the documented developer build against the installed
+          # package database as well as the Nix-packaged sdist build above.
+          devBuild = b.pkgs.runCommand "rechaos-dev-build" {
+            nativeBuildInputs = [ b.toolchain.ghc ];
+          } ''
+            cp -r ${b.devSrc} ./source
+            chmod -R u+w ./source
+            cd ./source
+            bash scripts/build.sh
+            runghc Setup.hs test --builddir=.build/cabal --show-details=direct
+            touch "$out"
+          '';
+          wire = b.pkgs.runCommand "rechaos-wire" {
+            nativeBuildInputs = [ b.python b.pkgs.ripgrep ];
+          } ''
+            cp -r ${b.pythonSrc} ./source
+            chmod -R u+w ./source
+            cd ./source
+            export RECHAOS_BIN=${b.package}/bin/rechaos
+            export RECHAOS_TEST_OUTPUT="$TMPDIR/integration"
+            bash scripts/test-python.sh
+            touch "$out"
+          '';
+          syntax = b.pkgs.runCommand "rechaos-script-syntax" {
+            nativeBuildInputs = [ b.python b.pkgs.ripgrep ];
+          } ''
+            cd ${b.pythonSrc}
+            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+            python3 -m compileall -q scripts test
+            while IFS= read -r script; do
+              bash -n "$script"
+            done < <(rg --files scripts -g '*.sh')
+            touch "$out"
+          '';
+          conformance = b.pkgs.runCommand "rechaos-conformance-drift" {
+            nativeBuildInputs = [ b.toolchain.ghc ];
+          } ''
+            cp -r ${b.conformanceSrc} ./source
+            chmod -R u+w ./source
+            cd ./source
+            runghc -isrc scripts/gen-conformance.hs
+            diff -ru ${b.conformanceSrc}/test/golden test/golden
+            diff -ru ${b.conformanceSrc}/lean lean
+            touch "$out"
+          '';
+          protos = b.pkgs.runCommand "rechaos-proto-drift" {
+            nativeBuildInputs = [ b.toolchain.ghc b.pkgs.protobuf b.pkgs.ripgrep ];
+          } ''
+            cp -r ${b.protoSrc} ./source
+            chmod -R u+w ./source
+            cd ./source
+            mv generated committed
+            bash scripts/generate-protos.sh
+            diff -ru committed generated
+            touch "$out"
+          '';
           # Formatting gate: fourmolu must report no changes over the
           # hand-written sources, honoring ./fourmolu.yaml.
           format = b.pkgs.runCommand "rechaos-format" {
             nativeBuildInputs = [ b.pkgs.haskellPackages.fourmolu ];
           } ''
             cd ${b.haskellSrc}
-            fourmolu --mode check -o -XImportQualifiedPost app src test
+            fourmolu --mode check -o -XImportQualifiedPost Setup.hs app src test scripts/gen-conformance.hs
             touch "$out"
           '';
           # Lint gate: hlint honoring ./.hlint.yaml.
@@ -97,7 +193,7 @@
             nativeBuildInputs = [ b.pkgs.haskellPackages.hlint ];
           } ''
             cd ${b.haskellSrc}
-            hlint -XImportQualifiedPost --hint=.hlint.yaml app src test
+            hlint -XImportQualifiedPost --hint=.hlint.yaml Setup.hs app src test scripts/gen-conformance.hs
             touch "$out"
           '';
           # Documentation gate: build Haddock for the whole package and fail on
@@ -108,42 +204,20 @@
             test -d ${b.docsPackage.doc}/share/doc
             touch "$out"
           '';
-          # Packaging/metadata gate: `cabal check` over the source tree, failing
-          # on any error-level finding (Hackage-metadata rot). Hermetic: runs
-          # against a read-only fileset copy, no network, no build.
-          cabalCheck = b.pkgs.runCommand "rechaos-cabal-check" {
-            nativeBuildInputs = [ b.pkgs.cabal-install ];
-          } ''
-            cp -r ${b.cabalSrc} ./src-tree
-            chmod -R u+w ./src-tree
-            cd ./src-tree
-            export HOME="$PWD/.home"
-            mkdir -p "$HOME"
-            cabal check
-            touch "$out"
-          '';
+          # Metadata check and sdist creation; test and docs consume this archive.
+          cabalCheck = b.sourceArchive;
           # Proof gate: the Lean 4 verified core must compile under Lean 4.30
           # with zero proof holes. We copy ./lean into a writable tree (lake
-          # writes .lake/), point HOME there, and run `lake build` fully offline
+          # writes .lake/), and run `lake build` fully offline
           # — no Mathlib, no network, pkgs.lean4 supplies the toolchain. The
-          # grep guards reject any `sorry`/`admit` that would let the kernel
-          # accept an unproved goal; the `[^`]` prefix skips the backtick-quoted
-          # word "sorry" in Core.lean's own doc comment (a mention, not a hole).
+          # Source guard rejects proof-hole terms and new axiom declarations,
+          # ignoring documentation comments and string literals.
           lean = b.pkgs.runCommand "rechaos-lean" {
-            nativeBuildInputs = [ b.pkgs.lean4 ];
+            nativeBuildInputs = [ b.pkgs.lean4 b.python ];
           } ''
             cp -r ${./lean} ./lean
             chmod -R u+w ./lean
-            export HOME="$PWD/.home"
-            mkdir -p "$HOME"
-            if grep -rnE '(^|[^`])sorry' ./lean/Rechaos; then
-              echo "forbidden: 'sorry' found in Lean proofs" >&2
-              exit 1
-            fi
-            if grep -rnE '(^|[^`])admit' ./lean/Rechaos; then
-              echo "forbidden: 'admit' found in Lean proofs" >&2
-              exit 1
-            fi
+            python3 ${./scripts/check_lean.py} ./lean
             cd ./lean
             lake build
             touch "$out"

@@ -36,6 +36,6 @@ in {
   # to build the rechaos.cabal package via callCabal2nix.
   inherit hp;
   # A bare ghc with every runtime dependency in its package database, for the
-  # hand-driven ghc --make path in scripts/build.sh and the dev shell.
+  # Cabal Setup.hs build driver in scripts/build.sh and the dev shell.
   inherit ghc;
 }

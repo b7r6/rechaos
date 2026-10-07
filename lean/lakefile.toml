@@ -1,5 +1,6 @@
 name = "rechaos"
 defaultTargets = ["Rechaos"]
+moreLeanArgs = ["-DwarningAsError=true"]
 
 [[lean_lib]]
 name = "Rechaos"
