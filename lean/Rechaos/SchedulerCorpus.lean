@@ -5,8 +5,8 @@
   produced by the real Haskell scheduler, and `native_decide` checks the Lean
   `fires`/`schedule` reproduce it (no kernel UInt64 reduction). No `sorry`.
 
-  `gateScope`     : (seed, chancePpm, fires?)   — the probability gate.
-  `decisionScope` : (policy, trace, injections) — full first-match scheduling.
+  `gate_scope`     : (seed, chance_ppm, fires?)   — the probability gate.
+  `decision_scope` : (policy, trace, injections) — full first-match scheduling.
 -/
 import Rechaos.Scheduler
 
@@ -14,7 +14,7 @@ namespace Rechaos
 
 set_option autoImplicit false
 
-/-- Reference-generated probability-gate scope: `(seed, chancePpm, fires?)`. -/
+/-- Reference-generated probability-gate scope: `(seed, chance_ppm, fires?)`. -/
 def gate_scope : List (UInt64 × Nat × Bool) :=
   [ ((0x0000000000000000 : UInt64), 0, false)
   , ((0x0000000000000000 : UInt64), 1, false)
@@ -181,8 +181,8 @@ def gate_scope : List (UInt64 × Nat × Bool) :=
   ]
 
 /-- The Lean `fires` reproduces the reference probability gate on every
-    row of `gateScope`: `fires chancePpm (nextSeed seed).1 = fires?`. The
-    draw is the output half of `nextSeed`, exactly as the reference `step`
+    row of `gate_scope`: `fires chance_ppm (next_seed seed).1 = fires?`. The
+    draw is the output half of `next_seed`, exactly as the reference `step`
     computes it. Checked by native evaluation. -/
 theorem fires_conforms_on_gate_scope :
     gate_scope.all (fun row => fires row.2.1 (next_seed row.1).1 == row.2.2) = true := by
@@ -221,7 +221,7 @@ def decision_scope : List (policy × List Event × List (Option Fault)) :=
   ]
 
 /-- The Lean `schedule` reproduces the reference injected-fault outcome on
-    every case in `decisionScope`: mapping each decision to its injection
+    every case in `decision_scope`: mapping each decision to its injection
     yields exactly the reference list. This is the full first-match +
     probability-gate differential. Checked by native evaluation. -/
 theorem schedule_conforms_on_decision_scope :

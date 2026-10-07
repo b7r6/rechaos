@@ -5,8 +5,8 @@
   here is produced by the real Haskell minimizer, and `native_decide` checks the
   Lean port reproduces it (no kernel UInt64 reduction). No `sorry`.
 
-  `candidateScope`  : (timeline, candidates)            — the candidate generator.
-  `trajectoryScope` : (timeline, threshold, best)       — one acceptance-driven
+  `candidate_scope`  : (timeline, candidates)            — the candidate generator.
+  `trajectory_scope` : (timeline, threshold, best)       — one acceptance-driven
                                                           shrink trajectory under a
                                                           deterministic oracle.
 -/
@@ -55,7 +55,7 @@ def candidate_scope : List (timeline × List timeline) :=
   ]
 
 /-- The Lean `candidates` reproduces the reference candidate set on every
-    timeline in `candidateScope`. This is the full candidate-generation
+    timeline in `candidate_scope`. This is the full candidate-generation
     differential (deletion halving to singletons, plus every `weaker`
     intensity step). Checked by native evaluation. -/
 theorem candidates_conforms_on_candidate_scope :
@@ -64,7 +64,7 @@ theorem candidates_conforms_on_candidate_scope :
 
 /-- A deterministic oracle for the trajectory scope: a candidate triggers iff
     it retains a `delay` of at least `threshold` micros somewhere. Mirrors the
-    reference `triggersAtLeast` in scripts/gen-conformance.hs exactly. -/
+    reference `triggers_at_least` in scripts/gen-conformance.hs exactly. -/
 def triggers_at_least (threshold : Nat) (timeline : timeline) : minimize_verdict :=
   if timeline.any (fun decision =>
        match decision.injection with
@@ -73,7 +73,7 @@ def triggers_at_least (threshold : Nat) (timeline : timeline) : minimize_verdict
   then .triggers else .doesNotTrigger
 
 /-- Drive the acceptance state machine to convergence under the deterministic
-    oracle, bounded by explicit fuel. Mirrors the reference `runShrink`. -/
+    oracle, bounded by explicit fuel. Mirrors the reference `run_shrink`. -/
 def run_shrink (oracle : timeline → minimize_verdict) : Nat → shrink_state → timeline
   | 0, state => state.best
   | fuel + 1, state =>
@@ -99,7 +99,7 @@ def trajectory_scope : List (timeline × Nat × timeline) :=
   ]
 
 /-- The Lean minimizer reproduces the reference converged `best` on every
-    trajectory in `trajectoryScope`: driving `start`/`candidate`/`observe`
+    trajectory in `trajectory_scope`: driving `start`/`candidate`/`observe`
     under the same deterministic oracle yields exactly the reference result.
     This is the acceptance-state-machine differential. Checked by native
     evaluation. -/
