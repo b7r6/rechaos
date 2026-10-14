@@ -157,6 +157,7 @@ scenario shrinks to a deletion-1-minimal witness exactly as a fault timeline doe
 | `minimize` | Shrink a failure to a minimal witness under a repeatable checker | `--timeline` or `--steps`, `--output`, `--check`, `--signature`, `--repetitions`, `--trial-timeout`, `--max-trials` |
 | `evaluate` | Evaluate the scheduler and object-store invariants (8-13) over a scenario's `observations.json` | `OBSERVATIONS`, `--queue-age-ms`, `--executing-ms`, `--download-budget-ms` |
 | `validate-steps` | Validate a scenario step list (JSONL or JSON array) | `STEPS` |
+| `modproxy` | Serve a Go module proxy over HTTP/2 and TLS from a directory, resetting chosen response streams mid-body (see `docs/dependency-fetch.md`) | `--root`, `--port`, `--certificate`, `--key`, `--reset-path`, `--reset-after-bytes`, `--reset-count`, `--log` |
 
 ## Chaos monkey
 

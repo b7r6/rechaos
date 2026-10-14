@@ -131,6 +131,14 @@ steps, as `dhall-to-json` renders) through the same fail-closed reader
 `weaker` declaration or a non-object line fails on stderr with its line number
 and exit 2.
 
+## `modproxy` — the per-request log
+
+`rechaos modproxy` runs until interrupted and writes nothing to stdout. Each
+request is one JSON line on stderr (and in `--log`):
+`{"request":N,"path":"/...","bytes":B,"outcome":"complete"|"reset"|"missing"|"rejected"}`,
+where `bytes` is what was delivered before the stream completed or was reset.
+Exit code 2 on a usage error or when the certificate and key do not load.
+
 ## `minimize` — the delta-debugging summary
 
 The `minimize` command emits a separate summary object from

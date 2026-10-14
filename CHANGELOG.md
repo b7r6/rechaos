@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `rechaos modproxy` (`Rechaos.Core.ModuleProxy`, `Rechaos.Shell.ModuleProxy`):
+  a Go module proxy over HTTP/2 and TLS that serves a module cache and resets
+  the first N matching responses mid-body with `RST_STREAM(INTERNAL_ERROR)`,
+  the fault a build reports as `stream error: stream ID n; INTERNAL_ERROR;
+  received from peer`. `scripts/fetch_matrix.py` and
+  `examples/dependency-fetch/` force a Bazel `go_repository` refetch under it
+  across client configurations; `docs/dependency-fetch.md` records that the Go
+  downloader does not retry, that a `,` in `GOPROXY` is no fallback for a
+  mid-body error, and that only the `|` separator copes.
 - Scheduler chaos: `scripts/fleet_rig.py` starts an isolated local NativeLink
   fleet (scheduler + N workers, optionally Redis-backed with the RediSearch
   module resolved automatically); `scripts/scheduler_steps.py` replays a JSONL

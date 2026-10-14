@@ -23,12 +23,14 @@ import Network.GRPC.Server.Run
 import Numeric.Natural (Natural)
 import Options.Applicative
 import Paths_rechaos (version)
+import Rechaos.Core.ModuleProxy qualified as ModuleProxy
 import Rechaos.Core.Oracle qualified as O
 import Rechaos.Core.Scenario (Limits (..))
 import Rechaos.Core.Scheduler (schedule, verifyReplay)
 import Rechaos.Core.Types
 import Rechaos.Shell.Json
 import Rechaos.Shell.Minimize
+import Rechaos.Shell.ModuleProxy
 import Rechaos.Shell.Oracle
 import Rechaos.Shell.Proxy
 import Rechaos.Shell.Runtime
@@ -64,6 +66,7 @@ data Command
   | VerifyReplay FilePath FilePath
   | Evaluate FilePath EvaluateOverrides
   | ValidateSteps FilePath
+  | ModuleProxy ModuleProxyOptions
 
 -- | Bounds that replace the ones recorded in an observations file.
 data EvaluateOverrides = EvaluateOverrides
@@ -153,6 +156,14 @@ commandParser =
           ( "Evaluate the scheduler and object-store invariants (8-13) over a scenario's observations.json. "
               <> "stdout: JSON report with findings and signatures; stderr: chatter. "
               <> "Exit codes: 0 evaluated (findings or not), 2 unreadable input."
+          )
+        <> command'
+          "modproxy"
+          (ModuleProxy <$> moduleProxyOptions)
+          ( "Serve a Go module proxy (GOPROXY layout) over HTTP/2 and TLS from a directory, "
+              <> "optionally resetting chosen response streams mid-body with RST_STREAM(INTERNAL_ERROR). "
+              <> "stderr: one JSON line per request. "
+              <> "Runs until interrupted; exit code 2 on usage/IO error."
           )
         <> command'
           "validate-steps"
@@ -302,7 +313,41 @@ withPath path act = act `catches` [Handler rioe, Handler rerr]
 serveHint :: String -> String
 serveHint msg = msg ++ " (see 'rechaos serve --help')"
 
+moduleProxyOptions :: Parser ModuleProxyOptions
+moduleProxyOptions =
+  ModuleProxyOptions
+    <$> optionString "root" "DIR" "Directory in GOPROXY layout (a module cache's cache/download)"
+    <*> strOption
+      (long "host" <> metavar "HOST" <> value "127.0.0.1" <> showDefault <> help "Listen address")
+    <*> option auto (long "port" <> metavar "PORT" <> value 3000 <> showDefault <> help "Listen port")
+    <*> optionFile "certificate" "TLS certificate PEM (the client must trust it)"
+    <*> optionFile "key" "TLS key PEM"
+    <*> optional
+      ( ModuleProxy.Rule
+          <$> (T.pack <$> optionString "reset-path" "SUBSTRING" "Reset responses whose path contains this")
+          <*> option
+            auto
+            ( long "reset-after-bytes"
+                <> metavar "BYTES"
+                <> value 65536
+                <> showDefault
+                <> help "Body bytes delivered before the reset"
+            )
+          <*> option
+            auto
+            ( long "reset-count"
+                <> metavar "N"
+                <> value 1
+                <> showDefault
+                <> help "How many matching requests to reset, in arrival order, before serving whole"
+            )
+      )
+    <*> optional (optionFile "log" "Append the per-request JSON lines here too")
+
 run :: Command -> IO ()
+run (ModuleProxy options) = do
+  unless (proxyPort options > 0 && proxyPort options <= 65535) $ fail "port must be in 1..65535"
+  serveModuleProxy options
 run (Validate path) = do
   _ <- withPath ("policy " ++ path) (readPolicy path)
   hPutStrLn stderr "policy valid"

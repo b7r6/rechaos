@@ -23,6 +23,7 @@ import Data.Text qualified as T
 import Data.Word (Word64, Word8)
 import Numeric.Natural (Natural)
 import Rechaos.Core.Minimize qualified as Min
+import Rechaos.Core.ModuleProxy qualified as ModuleProxy
 import Rechaos.Core.Oracle qualified as O
 import Rechaos.Core.Scenario qualified as Sc
 import Rechaos.Core.Scheduler
@@ -177,6 +178,15 @@ check name prop = do
 main :: IO ()
 main = do
   check "SplitMix64 published zero-seed vector" $ snd (nextSeed 0) == 0xe220a8397b1dcdaf
+  check "module proxy: exactly the first ruleCount matching requests are reset" $
+    \(NonNegative count) (NonNegative ordinal) (NonNegative bytes) ->
+      let rule = ModuleProxy.Rule (T.pack ".zip") (fromIntegral (bytes :: Int)) (fromIntegral (count :: Int))
+       in ModuleProxy.decide rule (fromIntegral (ordinal :: Int))
+            == (if ordinal < count then Just (fromIntegral bytes) else Nothing)
+  check "module proxy: a rule matches by substring and nothing else" $
+    \needle path ->
+      let rule = ModuleProxy.Rule (T.pack needle) 0 1
+       in ModuleProxy.matches rule (T.pack path) == (T.pack needle `T.isInfixOf` T.pack path)
   check "scheduler agrees with incremental execution across trace splits" $ \s (NonNegative count) ->
     let es = map (eventAt . fromIntegral) [1 .. (count `mod` 100 + 1 :: Int)]
         (a, b) = splitAt (count `mod` 30) es
