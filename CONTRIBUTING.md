@@ -31,6 +31,8 @@ bash scripts/test.sh   # focused core, Python, adapter, and wire tests while dev
 | `docs` | Build the package's Haddock documentation. |
 | `cabalCheck` | Check package metadata and create the source tarball consumed by `test` and `docs`. |
 | `lean` | Reject proof holes and added axioms; compile every Lean module with warnings as errors. |
+| `dhall-cpp` | Build the vendored C++ Dhall evaluator and require its JSON to equal `dhall-to-json`'s on every example and generated scenario (fleet configs excluded: their union values are the documented deviation). |
+| `dhall` | Type-check every Dhall definition offline, render each example scenario and validate it with `rechaos validate-steps`, and require the rendered NativeLink fleet configs to equal the Python rig's output as JSON. |
 
 All runtime tests use owned local fixtures. Campaigns against external REAPI,
 execution, or object-store services remain explicit operational runs; passing

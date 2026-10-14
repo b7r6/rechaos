@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Scheduler chaos: `scripts/fleet_rig.py` starts an isolated local NativeLink
+  fleet (scheduler + N workers, optionally Redis-backed with the RediSearch
+  module resolved automatically); `scripts/scheduler_steps.py` replays a JSONL
+  scenario (actions with `cpu_count`/`memory_kb`/inputs/timing, detached
+  clients, `store-full`/`store-pause`/`worker-pause` faults) and evaluates
+  invariants 8-13 (`queue-starvation`, `dispatch-stall`, `stuck-executing`,
+  `input-evicted-failure`) as a pure function; the chaos monkey's `--rig` mode
+  composes such scenarios cold and freezes each finding with a `minimize.sh`.
+- `Rechaos.Core.Scenario`: the scheduler and object-store invariants (8-13)
+  as a pure core function, exposed as `rechaos evaluate observations.json`,
+  with a differential contract against the Python engine's evaluator; and
+  `rechaos validate-steps`.
+- `scripts/dhall_bench.py` and `docs/dhall-cost.md`: what the reference Dhall
+  implementation costs per operation and input size, where it sits in each
+  loop, and the `--compare` protocol for a replacement. `vendor/dhall-cpp/`: a
+  C++ evaluator measured under that protocol (`nix build .#dhall-cpp`, gated by
+  `checks.dhall-cpp` for agreement on scenario inputs); 33 to 35x faster on
+  literal witnesses, equal as parsed JSON on scenarios, no type checker,
+  non-standard union normal form, arena memory never freed, and an upstream
+  without a license file (not redistributable until one is attached). Not the
+  gate's implementation.
+- `dhall/`: typed scenario steps, fleet parameters, NativeLink configs, and
+  limits that render to the wire JSON with `dhall-to-json`; the `dhall` flake
+  check type-checks them offline, validates the example scenarios, and requires
+  the rendered fleet configs to equal `scripts/fleet_rig.py config`.
+- Object-store dialects as an explicit fault category: `s3_fault_proxy.py
+  --dialect s3|azure|gcs` answers throttles in each hyperscaler's exact shape
+  (Azure `503 ServerBusy` + `x-ms-error-code` + "Egress is over the account
+  limit.", S3 `SlowDown`, GCS JSON `backendError`/`rateLimitExceeded`, all
+  with `Retry-After`) and gains a control endpoint (`--control`: sustained
+  throttle on/off, per-key request counts). The fleet rig's `--cas-backend
+  azure|s3` puts NativeLink's own cloud client behind it over Azurite or
+  MinIO; the `store-throttle` scenario step and invariants 12-13
+  (`store-throttle-giveup`, `store-throttle-redispatch`) catch a client that
+  gives up inside the worker's download budget or re-dispatches the action.
+- `rechaos minimize --steps`: the delta-debugger over an opaque JSONL step list
+  (deletion plus declared `weaker` halving), handed to the checker as
+  `$RECHAOS_STEPS`. `Rechaos.Core.Shrink` is the element-generic core that
+  `Rechaos.Core.Minimize` now instantiates; its timeline candidates are unchanged
+  (conformance corpora identical).
 - REAPI chaos gateway (`rechaos serve`): delay / abort / dribble / truncate /
   corrupt faults over a strict, versioned policy DSL, with deterministic replay.
 - `corrupt` fault (`{"kind":"corrupt","bytes":N}`): a length-preserving

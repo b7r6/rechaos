@@ -117,6 +117,13 @@ consumed per observed message.
 ./result/bin/rechaos minimize \
   --timeline runs/chaos.jsonl --output runs/minimal.jsonl \
   --signature my-repro --check 'python3 my_checker.py'
+
+# The same shrinker over a scheduler scenario (a JSONL step list) instead of a
+# gateway timeline; the checker reads $RECHAOS_STEPS. See docs/scheduler-chaos.md.
+./result/bin/rechaos minimize \
+  --steps runs/monkey/corpus/queue-starvation/steps.jsonl --output runs/minimal-steps.jsonl \
+  --signature queue-starvation \
+  --check 'python3 scripts/scheduler_steps.py check --rig runs/rig/rig.json --signature queue-starvation --fresh'
 ```
 
 The JSONL timeline stores the decisions needed for replay: each row contains an observed
@@ -133,6 +140,10 @@ success from a directory. The library also returns `Inconclusive` for failed or
 timed-out builds. The shrinker is deletion-1-minimal after an exhausted search
 with a repeatable, conclusive checker. It reports `inconclusive` if unresolved
 checker outcomes prevent that claim, and `trial-limit` if the search budget ends.
+With `--steps`, the same candidate generator and acceptance rule run over an
+opaque JSONL step list: every step is deletable, and a step may declare under
+`weaker` which integer fields shrink (halving toward a floor), so a scheduler
+scenario shrinks to a deletion-1-minimal witness exactly as a fault timeline does.
 
 ## Commands
 
@@ -143,7 +154,9 @@ checker outcomes prevent that claim, and `trial-limit` if the search budget ends
 | `schedule` | Recompute decisions from a recorded event trace | `--policy`, `--trace`, `--output` |
 | `validate` | Validate a policy JSON file | `POLICY` |
 | `verify-replay` | Check every expected event was observed with matching fingerprints and faults | `EXPECTED_TIMELINE`, `OBSERVED_TIMELINE` |
-| `minimize` | Shrink a failure to a minimal witness under a repeatable checker | `--timeline`, `--output`, `--check`, `--signature`, `--repetitions`, `--trial-timeout`, `--max-trials` |
+| `minimize` | Shrink a failure to a minimal witness under a repeatable checker | `--timeline` or `--steps`, `--output`, `--check`, `--signature`, `--repetitions`, `--trial-timeout`, `--max-trials` |
+| `evaluate` | Evaluate the scheduler and object-store invariants (8-13) over a scenario's `observations.json` | `OBSERVATIONS`, `--queue-age-ms`, `--executing-ms`, `--download-budget-ms` |
+| `validate-steps` | Validate a scenario step list (JSONL or JSON array) | `STEPS` |
 
 ## Chaos monkey
 
@@ -168,7 +181,30 @@ its digest; a successful Write's `committed_size` must equal the advertised size
 `FindMissingBlobs` must be consistent; `QueryWriteStatus` must not over-report;
 known-good traffic must recover after each fault. With `--execution`, it also
 stresses the Execution/scheduler path and detects awaited-action queue-GC leaks
-(store occupancy that never drains after completion).
+(store occupancy that never drains after completion). With `--rig rig.json`
+(a fleet started by [`scripts/fleet_rig.py`](scripts/fleet_rig.py)) it adds a
+scheduler mode that composes random multi-worker scenarios, replays them through
+[`scripts/scheduler_steps.py`](scripts/scheduler_steps.py), and checks the
+scheduler liveness invariants (queue starvation, dispatch stalls, operations
+stuck in `EXECUTING`, worker-cache evictions failing actions whose inputs are
+present) and, on a rig started with `--cas-backend azure|s3`, the object-store dialect
+invariants (a hyperscaler throttle in its exact shape must neither fail an
+action inside the worker's download budget nor re-dispatch it). Each such finding freezes its step list, observations, rig manifest,
+and a `minimize.sh` that shrinks it with `rechaos minimize --steps`. See
+[`docs/scheduler-chaos.md`](docs/scheduler-chaos.md).
+
+```sh
+NATIVELINK_BIN=/path/to/nativelink python3 scripts/fleet_rig.py up --backend redis --workers 3 --out runs/rig --detach
+NATIVELINK_BIN=/path/to/nativelink python3 scripts/fleet_rig.py up --cas-backend azure --max-action-executing-timeout-s 0 --out runs/rig-az --detach
+nix develop --command python3 scripts/chaos-monkey.py --rig runs/rig/rig.json --only-scheduler
+```
+
+The object-store egress proxy ([`scripts/s3_fault_proxy.py`](scripts/s3_fault_proxy.py))
+speaks three dialects (`--dialect s3|azure|gcs`): Azure's `503 ServerBusy`
+with `x-ms-error-code` and "Egress is over the account limit.", S3's
+`SlowDown`, and GCS's JSON errors, each with `Retry-After`, plus a control
+endpoint that switches a sustained throttle on and off and counts requests per
+key. See [`docs/s3-faults.md`](docs/s3-faults.md).
 
 ## Architecture
 
@@ -182,21 +218,27 @@ behind the pure-core / IO-shell split, the determinism model, and replay.
 | `Core/Types` | Fault algebra, policy, event and timeline values; explicit units |
 | `Core/Scheduler` | SplitMix64 step, first-match targeting, probability, replay checks |
 | `Core/Oracle` | Output-tree maps, difference, equivalence, build verdicts |
-| `Core/Minimize` | Candidate generation and acceptance state machine |
+| `Core/Shrink` | Element-generic delta debugging: chunk deletions plus caller-supplied intensity steps |
+| `Core/Minimize` | `Core/Shrink` at gateway decisions: injected-fault filtering and the per-fault `weaker` order |
+| `Core/Scenario` | Scheduler and object-store liveness invariants (8-13) as a pure function of observed actions and fault windows |
 | `Shell/Json` | Versioned policy/timeline decoding and validation |
 | `Shell/Runtime` | Monotonic observations, occurrence allocation, journal writes |
 | `Shell/Wire`, `Protocol`, `Proxy` | grapesy server/client, pacing, stream edits, deadlines |
-| `Shell/Oracle`, `Shell/Minimize` | Filesystem snapshot + SHA256; external checker driver |
+| `Shell/Oracle`, `Shell/Minimize` | Filesystem snapshot + SHA256; external checker driver over timelines or step lists |
+| `Shell/Steps` | Opaque JSONL scenario steps: validation and the declared `weaker` halving |
+| `Shell/Scenario` | `observations.json` decoding and findings as JSON for `rechaos evaluate` |
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
+| `dhall/` | Typed scenario steps, fleet parameters, NativeLink configs, and limits, rendered with `dhall-to-json`; a flake check keeps them equal to the Python emitter. See [`docs/scheduler-chaos.md`](docs/scheduler-chaos.md#authoring-scenarios-and-fleets-in-dhall) |
+| `vendor/dhall-cpp/` | A C++ Dhall evaluator vendored for measurement (`nix build .#dhall-cpp`), 33x faster than the reference on literal witnesses, equal as parsed JSON on every scenario input, but without a type checker and with a non-standard union normal form; its upstream carries no license yet, so it is not redistributable until one is attached; provenance and patches in its `NOTICE.md`, numbers in [`docs/dhall-cost.md`](docs/dhall-cost.md) |
 | `examples/` | `fault-policy.json`, the complete one-file policy example; `examples/chaos/*.json5`, NativeLink server configs for isolated local endpoints used in reproductions, mapped to their roles and launch commands in [`examples/chaos/README.md`](examples/chaos/README.md) |
-| `scripts/` | `chaos-monkey.py`, build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
+| `scripts/` | `chaos-monkey.py`, `fleet_rig.py` (local multi-worker NativeLink fleet, optionally Redis-backed), `scheduler_steps.py` (scenario engine, invariant evaluator, minimize checker), build/test wrappers, protobuf fetch/generate helpers, and standalone `repro-*.py` reproducers |
 | `runs/` | Local, ignored run artifacts: timelines, outcomes, summaries, and reproducer evidence |
 | `proto/` | Vendored `remote-apis` and `googleapis` protocol definitions with their licenses |
-| `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`tutorial.md`](docs/tutorial.md) (end-to-end walkthrough), [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), and [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema) |
+| `docs/` | Reference docs, indexed by [`docs/README.md`](docs/README.md): [`tutorial.md`](docs/tutorial.md) (end-to-end walkthrough), [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (design rationale), [`invariants.md`](docs/invariants.md) (invariants catalog), [`fault-dsl.md`](docs/fault-dsl.md) (policy DSL), [`timeline-format.md`](docs/timeline-format.md) (on-disk timeline/outcomes schema), and [`scheduler-chaos.md`](docs/scheduler-chaos.md) (fleet rig, scenario steps, scheduler invariants) |
 
 ## Develop
 

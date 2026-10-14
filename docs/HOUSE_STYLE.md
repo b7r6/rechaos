@@ -215,6 +215,11 @@ actually run — all through `nix flake check`, the single disciplined runner �
 - **`lean`** — the Lean 4 verified core builds with zero proof holes
   (`check_lean.py` rejects `sorry`/`admit`/new `axiom`; `lake build` with
   `warningAsError=true`).
+- **`syntax` / `devBuild`** — every script compiles or parses; the documented
+  `scripts/build.sh` path builds against the pinned package set.
+- **`dhall` / `dhall-cpp`** — the typed definitions type-check offline and
+  render to what the Python emitter produces; the vendored C++ evaluator agrees
+  with the reference on every scenario input.
 
 If a check is not wired into `nix flake check`, it atrophies; do not add a
 parallel manual path.

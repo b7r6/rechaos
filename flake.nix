@@ -76,7 +76,26 @@
           };
           dhallSrc = pkgs.lib.fileset.toSource {
             root = ./.;
-            fileset = pkgs.lib.fileset.unions [ ./dhall ./scripts/fleet_rig.py ];
+            fileset = pkgs.lib.fileset.unions [ ./dhall ./scripts/fleet_rig.py ./scripts/dhall_bench.py ];
+          };
+          # The vendored C++ Dhall evaluator (vendor/dhall-cpp/NOTICE.md) with its
+          # command-line driver; measured, not yet the gate's implementation.
+          dhallCpp = pkgs.stdenv.mkDerivation {
+            pname = "dhall-cpp";
+            version = "0.1.0";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = ./vendor/dhall-cpp;
+            };
+            buildInputs = [ pkgs.spdlog pkgs.fmt ];
+            buildPhase = ''
+              $CXX -std=c++23 -O2 -DSPDLOG_FMT_EXTERNAL -Ivendor/dhall-cpp/include \
+                vendor/dhall-cpp/src/lexer.cpp vendor/dhall-cpp/src/parser.cpp \
+                vendor/dhall-cpp/tools/dhall-cpp.cpp -lspdlog -lfmt -o dhall-cpp
+            '';
+            installPhase = ''
+              install -Dm755 dhall-cpp "$out/bin/dhall-cpp"
+            '';
           };
           protoSrc = pkgs.lib.fileset.toSource {
             root = ./.;
@@ -112,7 +131,7 @@
             latexmk -pdf -interaction=nonstopmode -halt-on-error rechaos.tex
             install -Dm444 rechaos.pdf "$out/rechaos.pdf"
           '';
-        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc dhallSrc protoSrc devSrc paper; };
+        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc dhallSrc dhallCpp protoSrc devSrc paper; };
     in {
       packages = eachSystem (system:
         let b = build system;
@@ -122,6 +141,8 @@
           docs = b.docsPackage.doc;
           # The compiled paper: `nix build .#paper` -> result/rechaos.pdf.
           paper = b.paper;
+          # The vendored C++ Dhall evaluator's driver: `nix build .#dhall-cpp`.
+          dhall-cpp = b.dhallCpp;
         });
       # `nix run .# -- serve ...` runs the shipped executable. The cabal stanza
       # names it `rechaos`, matching the result symlink's bin/rechaos.
@@ -239,6 +260,35 @@
                 dh = json.load(open(f"{d}/dhall-{name}.json"))
                 if py != dh:
                     sys.exit(f"dhall/NativeLink.dhall and scripts/fleet_rig.py disagree on {name}")
+            PY
+            touch "$out"
+          '';
+          # Vendored-evaluator gate: the C++ evaluator renders every example and
+          # generated scenario to the same JSON as the reference. Fleet configs are
+          # excluded on purpose: their union values are the documented deviation
+          # (docs/dhall-cost.md). This pins the vendored copy, not the gate's tool.
+          dhall-cpp = b.pkgs.runCommand "rechaos-dhall-cpp" {
+            nativeBuildInputs = [ b.pkgs.dhall-json b.python b.dhallCpp ];
+          } ''
+            cd ${b.dhallSrc}
+            export XDG_CACHE_HOME="$TMPDIR/cache"
+            python3 -I - "$TMPDIR" <<'PY'
+            import json, pathlib, subprocess, sys
+            tmp = pathlib.Path(sys.argv[1])
+            sys.path.insert(0, "scripts")
+            import dhall_bench
+            inputs = sorted(pathlib.Path("dhall/examples").glob("scn-*.dhall"))
+            for n in (10, 1000):
+                for name, text in (("literal", dhall_bench.literal_scenario(n)), ("generated", dhall_bench.generated_scenario(n))):
+                    path = tmp / f"{name}-{n}.dhall"
+                    path.write_text(text.replace(str(dhall_bench.DHALL), str(pathlib.Path("dhall").resolve())))
+                    inputs.append(path)
+            for path in inputs:
+                reference = json.loads(subprocess.check_output(["dhall-to-json", "--file", str(path)]))
+                candidate = json.loads(subprocess.check_output(["dhall-cpp", "to-json", str(path)]))
+                if reference != candidate:
+                    sys.exit(f"dhall-cpp disagrees with dhall-to-json on {path}")
+            print(f"dhall-cpp agrees with the reference on {len(inputs)} scenario inputs")
             PY
             touch "$out"
           '';
