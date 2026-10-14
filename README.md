@@ -181,7 +181,9 @@ its digest; a successful Write's `committed_size` must equal the advertised size
 `FindMissingBlobs` must be consistent; `QueryWriteStatus` must not over-report;
 known-good traffic must recover after each fault. With `--execution`, it also
 stresses the Execution/scheduler path and detects awaited-action queue-GC leaks
-(store occupancy that never drains after completion). With `--rig rig.json`
+(store occupancy that never drains after completion); its actions run
+`/bin/sh -c true`, the one command every REAPI worker, FHS or NixOS, can resolve
+(see [`docs/scheduler-chaos.md`](docs/scheduler-chaos.md), "Worker-side commands"). With `--rig rig.json`
 (a fleet started by [`scripts/fleet_rig.py`](scripts/fleet_rig.py)) it adds a
 scheduler mode that composes random multi-worker scenarios, replays them through
 [`scripts/scheduler_steps.py`](scripts/scheduler_steps.py), and checks the

@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import pathlib
 import re
+import shlex
 import sys
 import time
 import urllib.request
@@ -36,13 +37,16 @@ from google.longrunning import operations_pb2 as oplr  # noqa: E402
 
 OP_FAMILY = re.compile(
     r"action_db_operation_ids_([0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12})")
-DEFAULT_TRUE = "/usr/bin/true"
+# n.b. Runs on the WORKER, which need not be an FHS host (a NixOS worker has no
+# /bin/true or /usr/bin/true, and such an action "completes" with exit 127).
+# /bin/sh is the one path every REAPI worker ships; `true` is a shell builtin.
+DEFAULT_COMMAND = "/bin/sh -c true"
 
 
 class Cluster:
-    def __init__(self, host, port, metrics_port, instance, true_path):
+    def __init__(self, host, port, metrics_port, instance, command):
         self.instance = instance
-        self.true_path = true_path
+        self.command = command
         self.metrics_url = f"http://{host}:{metrics_port}/metrics"
         self.ch = grpc.insecure_channel(f"{host}:{port}")
         grpc.channel_ready_future(self.ch).result(timeout=10)
@@ -62,10 +66,10 @@ class Cluster:
         return re_pb.Digest(hash=h, size_bytes=len(data))
 
     def run_action(self, salt, timeout=30):
-        """Build a trivial /bin/true action and run it to a terminal state.
+        """Build a trivial no-op action and run it to a terminal state.
         Returns (stage, exit_code, grpc_status_code)."""
         plat = re_pb.Platform(properties=[re_pb.Platform.Property(name="cpu_count", value="1")])
-        cmd_d = self._upload(re_pb.Command(arguments=[self.true_path], platform=plat).SerializeToString())
+        cmd_d = self._upload(re_pb.Command(arguments=self.command, platform=plat).SerializeToString())
         root_d = self._upload(re_pb.Directory().SerializeToString())
         act_d = self._upload(re_pb.Action(command_digest=cmd_d, input_root_digest=root_d,
                                           do_not_cache=True, salt=salt, platform=plat).SerializeToString())
@@ -100,10 +104,11 @@ def main():
     p.add_argument("--count", type=int, default=20, help="actions to run to completion")
     p.add_argument("--quiet-wait", type=float, default=20,
                    help="quiet seconds to wait after completion (must exceed retain_completed_for_s)")
-    p.add_argument("--true-path", default=DEFAULT_TRUE)
+    p.add_argument("--command", default=DEFAULT_COMMAND,
+                   help="argv of the no-op action, shell-split; it must resolve on the WORKER")
     args = p.parse_args()
     mp = args.metrics_port or args.port
-    c = Cluster(args.host, args.port, mp, args.instance, args.true_path)
+    c = Cluster(args.host, args.port, mp, args.instance, shlex.split(args.command))
 
     base = c.store_occupancy()
     print(f"[0] baseline awaited-action store occupancy: {base}", flush=True)

@@ -52,7 +52,6 @@ import json
 import os
 import pathlib
 import re
-import shutil
 import signal
 import sys
 import threading
@@ -75,6 +74,10 @@ STAGE = {0: "UNKNOWN", 1: "CACHE_CHECK", 2: "QUEUED", 3: "EXECUTING", 4: "COMPLE
 CLIENT_SIDE = {"CANCELLED", "DEADLINE_EXCEEDED", "CLIENT_CANCELLED", "UNAVAILABLE"}
 EVICTION_TEXT = re.compile(r"evict|hard ?link", re.IGNORECASE)
 CONTROL_STEPS = {"store-full", "store-pause", "worker-pause", "store-throttle"}
+# PATH handed to every action's command. The worker clears the environment, so
+# `sleep` must be found through this; it covers NixOS (/run/current-system/sw/bin)
+# and FHS hosts alike and is part of the action digest.
+WORKER_PATH = "/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
 # Time inside any control window is discounted from the queue-age and executing
 # bounds (see _faulted_ms); a store throttle additionally has invariants 12 and
 # 13 that look inside its window, because the store says "retry later" and giving
@@ -332,7 +335,13 @@ class Scenario:
         # on is recorded so it can be undone even when the run is torn down.
         self.errors = []
         self.active_faults = []
-        self.sleep_binary = shutil.which("sleep") or "/bin/sleep"
+        # n.b. The command runs on the WORKER with an empty environment, so it
+        # is `/bin/sh -c 'sleep N'` (every REAPI worker ships /bin/sh) with an
+        # explicit PATH that covers NixOS and FHS hosts; a `sleep` path resolved
+        # on this host would be shipped to a worker that may not have it. Both
+        # are constant for the run, so the action digest varies only with the
+        # scenario's own fields.
+        self.worker_path = WORKER_PATH
         # Every control window's length: actions must outlive the faults they share a scenario with.
         self.control_ms = sum(int(s.get("for_ms", 0)) for s in steps if s.get("step") in CONTROL_STEPS)
 
@@ -381,11 +390,10 @@ class Scenario:
                 for i, n in enumerate(names)])
             root = client.upload(directory.SerializeToString())
             cpu, memory_kb, sleep_ms = s.get("cpu", 1), s.get("memory_kb", 0), s.get("sleep_ms", 0)
-            # n.b. The worker runs the command with an empty environment (no PATH),
-            # so the sleep binary is named absolutely; it is resolved on this host,
-            # which is the host the local workers run on.
-            command = reapi.Command(arguments=[self.sleep_binary, f"{sleep_ms / 1000:.3f}"],
-                                    platform=platform(cpu, memory_kb))
+            command = reapi.Command(
+                arguments=["/bin/sh", "-c", f"sleep {sleep_ms / 1000:.3f}"],
+                environment_variables=[reapi.Command.EnvironmentVariable(name="PATH", value=self.worker_path)],
+                platform=platform(cpu, memory_kb))
             command_digest = client.upload(command.SerializeToString())
             salt = hashlib.sha256(f"{self.nonce}/{s['id']}".encode()).digest()
             action = reapi.Action(command_digest=command_digest, input_root_digest=root, do_not_cache=True,
