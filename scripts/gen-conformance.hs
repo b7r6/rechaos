@@ -312,7 +312,7 @@ triggersAtLeast threshold tl =
 -- bounded by explicit fuel (the corpus scope needs far less than the cap). Returns
 -- the converged `best` timeline. Uses only the reference `start`/`candidate`/
 -- `observe`, so the trajectory is reference-generated end to end.
-runShrink :: (Timeline -> Min.Verdict) -> Int -> Min.ShrinkState -> Timeline
+runShrink :: (Timeline -> Min.Verdict) -> Int -> Min.ShrinkState Decision -> Timeline
 runShrink _ 0 st = Min.best st
 runShrink oracle fuel st = case Min.candidate st of
   Nothing -> Min.best st

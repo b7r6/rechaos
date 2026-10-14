@@ -9,10 +9,13 @@
 {- | Witness-preserving shrinking of a failing 'Timeline' down to a small
 reproducer.
 
-Minimization is a candidate\/observe state machine ('ShrinkState'): 'start' seeds
-it from a failing timeline, 'candidate' offers the next timeline to try, and
-'observe' folds the shell's 'Verdict' back in — accepting a candidate only when it
-still 'Triggers' the failure. Because candidates include chunk deletions down to
+This is "Rechaos.Core.Shrink" instantiated at 'Decision': the candidate
+generator and acceptance state machine are shared, and this module supplies the
+timeline-specific pieces, namely that only injected faults are shrunk and the
+'weaker' intensity order for each 'Fault'. 'start' seeds the machine from a
+failing timeline, 'candidate' offers the next timeline to try, and 'observe'
+folds the shell's 'Verdict' back in, accepting a candidate only when it still
+'Triggers' the failure. Because candidates include chunk deletions down to
 singletons, a fully explored result is deletion-1-minimal for a deterministic
 predicate: no single retained fault can be dropped without losing the failure.
 Intensity shrinking follows a separate, strictly decreasing (weaker) measure.
@@ -22,55 +25,28 @@ SAME failure signature counts as triggering; a flake, timeout, or infrastructure
 error is 'Unknown' and must never be treated as a successful shrink. This module
 is pure: no IO and no partial functions.
 -}
-module Rechaos.Core.Minimize (Verdict (..), ShrinkState (..), start, candidate, observe, candidates) where
+module Rechaos.Core.Minimize (
+  Verdict (..),
+  ShrinkState (..),
+  start,
+  candidate,
+  observe,
+  candidates,
+  weaker,
+  weakerDecision,
+) where
 
-import Data.List (nub)
 import Data.Maybe (isJust)
 import Numeric.Natural (Natural)
+import Rechaos.Core.Shrink (ShrinkState (..), Verdict (..), candidate)
+import Rechaos.Core.Shrink qualified as Shrink
 import Rechaos.Core.Types
-
--- The shell must reproduce the SAME failure signature, not merely a nonzero
--- exit code. A flaky/timeout/infrastructure result must be Unknown.
-
-{- | The shell's judgement on a shrink candidate. The shell must reproduce the
-  SAME failure signature, not merely a nonzero exit code: a flaky, timeout, or
-  infrastructure result is 'Unknown' and is treated conservatively (the
-  candidate is discarded, not accepted).
--}
-data Verdict
-  = -- | The candidate reproduced the original failure signature.
-    Triggers
-  | -- | The candidate ran but did not reproduce the failure.
-    DoesNotTrigger
-  | -- | The run was inconclusive (flake, timeout, infrastructure error).
-    Unknown
-  deriving (Eq, Show)
-
-{- | The minimizer's state: the best (smallest) timeline known to trigger so far,
-  and the queue of candidates still to try against it.
--}
-data ShrinkState = ShrinkState
-  { best :: Timeline
-  -- ^ Smallest timeline confirmed to still 'Triggers' the failure.
-  , pending :: [Timeline]
-  -- ^ Candidates yet to be offered, in order.
-  }
-  deriving (Eq, Show)
 
 {- | Seed the state machine from a failing timeline. Keeps only its injected
   faults as the initial 'best' and enqueues their 'candidates'.
 -}
-start :: Timeline -> ShrinkState
-start xs =
-  let faults = filter (isJust . injection) xs
-   in ShrinkState faults (candidates faults)
-
-{- | The next candidate timeline to test, or 'Nothing' when the queue is empty and
-  shrinking has converged on 'best'.
--}
-candidate :: ShrinkState -> Maybe Timeline
-candidate (ShrinkState _ []) = Nothing
-candidate (ShrinkState _ (x : _)) = Just x
+start :: Timeline -> ShrinkState Decision
+start = Shrink.start weakerDecision . filter (isJust . injection)
 
 {- | Fold the shell's 'Verdict' on the current candidate back into the state. On
   'Triggers' the candidate becomes the new 'best' and its own 'candidates' are
@@ -78,14 +54,8 @@ candidate (ShrinkState _ (x : _)) = Just x
   'DoesNotTrigger' or 'Unknown' the candidate is discarded and the next one is
   tried. Conservative: an 'Unknown' never advances 'best'.
 -}
-observe :: Verdict -> ShrinkState -> ShrinkState
-observe _ s@(ShrinkState _ []) = s
-observe Triggers (ShrinkState _ (x : _)) = ShrinkState x (candidates x)
-observe _ (ShrinkState b (_ : xs)) = ShrinkState b xs
-
--- Chunk deletion down to singletons makes the result deletion-1-minimal for a
--- deterministic predicate. Intensity shrinking follows a finite, decreasing
--- measure; timing is explicit in the retained event identity and Delay value.
+observe :: Verdict -> ShrinkState Decision -> ShrinkState Decision
+observe = Shrink.observe weakerDecision
 
 {- | All shrink candidates derived from a timeline: chunk deletions at halving
   sizes down to singletons, plus intensity reductions that replace one injected
@@ -95,21 +65,13 @@ observe _ (ShrinkState b (_ : xs)) = ShrinkState b xs
   timing stays explicit in the retained event identity and 'Delay' value.
 -}
 candidates :: Timeline -> [Timeline]
-candidates xs = nub (deletions ++ intensities)
- where
-  n = length xs
-  sizes = descending n
-  deletions = [take i xs ++ drop (i + k) xs | k <- sizes, i <- [0, k .. n - 1]]
-  intensities =
-    [ take i xs ++ [d{injection = Just f}] ++ drop (i + 1) xs
-    | (i, d) <- zip [0 ..] xs
-    , Just old <- [injection d]
-    , f <- weaker (event d) old
-    ]
-  descending k
-    | k <= 0 = []
-    | k == 1 = [1]
-    | otherwise = k : descending (k `div` 2)
+candidates = Shrink.candidates weakerDecision
+
+{- | The strictly weaker forms of one decision: the same event carrying each
+  'weaker' variant of its injected fault. A passthrough decision has none.
+-}
+weakerDecision :: Decision -> [Decision]
+weakerDecision d = [d{injection = Just f} | Just old <- [injection d], f <- weaker (event d) old]
 
 {- | Strictly weaker variants of a fault, if any, used for intensity shrinking.
   Each step moves along a finite, decreasing measure toward the event's natural

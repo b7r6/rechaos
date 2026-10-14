@@ -11,19 +11,22 @@
 
 module Main (main) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (unless)
 import Data.Aeson (decode, eitherDecode, encode, object, (.=))
 import Data.ByteString.Lazy qualified as L
 import Data.ByteString.Lazy.Char8 qualified as LC
 import Data.List (sort)
 import Data.Map.Strict qualified as M
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text qualified as T
 import Data.Word (Word64, Word8)
 import Numeric.Natural (Natural)
 import Rechaos.Core.Minimize qualified as Min
 import Rechaos.Core.Oracle qualified as O
+import Rechaos.Core.Scenario qualified as Sc
 import Rechaos.Core.Scheduler
+import Rechaos.Core.Shrink qualified as Shrink
 import Rechaos.Core.Types
 import Rechaos.Shell.Json ()
 import System.Environment (lookupEnv)
@@ -326,6 +329,55 @@ main = do
           , Decision e2 (Just (Dribble (eMessageBytes e2 * 1000000) 16))
           ]
      in all ((< length capped) . length) (Min.candidates capped)
+  -- (B') element-generic shrinker ---------------------------------------------
+  -- n.b. These hold the generic core to the same contract as the timeline
+  -- instance: every candidate is strictly smaller under (length, sum) for a
+  -- halving weaker, and an exhausted search is deletion-1-minimal under the
+  -- predicate "some element is at least the threshold".
+  check "generic shrink candidates are strictly smaller under (length, sum)" $ \(ns :: [NonNegative Int]) ->
+    let xs = map getNonNegative ns
+        halve n = [n `div` 2 | n > 0]
+        measure ys = (length ys, sum ys)
+     in all (\c -> measure c < measure xs) (Shrink.candidates halve xs)
+  check "generic shrink converges to a 1-minimal witness for a threshold predicate" $ \(ns :: [NonNegative Int]) (Positive k) ->
+    let xs = map getNonNegative ns ++ [k + 7]
+        halve n = [n `div` 2 | n > 0]
+        triggers = any (>= k)
+        search 0 s = Shrink.best s
+        search fuel s = maybe (Shrink.best s) (step fuel s) (Shrink.candidate s)
+        step fuel s c =
+          search
+            (fuel - 1 :: Int)
+            (Shrink.observe halve (if triggers c then Shrink.Triggers else Shrink.DoesNotTrigger) s)
+        result = search 4000 (Shrink.start halve xs)
+     in triggers result && length result == 1 && all (not . triggers) (Shrink.candidates halve result)
+  check "generic shrink never advances on Unknown" $ \(ns :: [NonNegative Int]) ->
+    let xs = 1 : map getNonNegative ns
+        halve n = [n `div` 2 | n > 0]
+        s = Shrink.start halve xs
+     in Shrink.best (Shrink.observe halve Shrink.Unknown s) == xs
+  -- (B'') scenario invariants ---------------------------------------------------
+  -- n.b. The evaluator is the pure core of invariants 8-13; the Python engine's
+  -- differential contract (test/steps_contracts.py) pins it to the reference
+  -- behavior case by case, and these properties pin what must hold of any
+  -- observations at all.
+  check "scenario evaluation is deterministic and independent of action order" $ \(Positive seed) ->
+    let obs = scenarioObservations seed
+        shuffled = obs{Sc.oActions = reverse (Sc.oActions obs)}
+     in Sc.evaluate scenarioLimits obs == Sc.evaluate scenarioLimits shuffled
+  check "an idle fleet that dispatches every action within the bound is never a finding" $ \(Positive n) ->
+    let acts = [promptAction i | i <- [1 .. min 40 (n :: Int)]]
+     in null (Sc.evaluate scenarioLimits (Sc.Observations acts []))
+  check "findings are sorted by signature then action and name only observed actions" $ \(Positive seed) ->
+    let obs = scenarioObservations seed
+        fs = Sc.evaluate scenarioLimits obs
+        keys = [(Sc.fSignature f, Sc.fAction f) | f <- fs]
+     in keys == sort keys && all ((`elem` map Sc.aId (Sc.oActions obs)) . Sc.fAction) fs
+  check "a control window covering a wait discounts it entirely" $ \(Positive seed) ->
+    let obs = scenarioObservations seed
+        covering = [Sc.Control "store-pause" 0 (10 ^ (9 :: Int))]
+        fs = Sc.evaluate scenarioLimits obs{Sc.oControls = covering}
+     in all ((`notElem` ["queue-starvation", "dispatch-stall", "stuck-executing"]) . Sc.fSignature) fs
   -- (C) ppm statistics --------------------------------------------------------
   check "empirical injection frequency tracks chancePpm within tolerance" $
     all withinBand [250000, 500000, 750000]
@@ -858,7 +910,7 @@ main = do
       _ -> False
   -- Drive the acceptance state machine to convergence, bounded by fuel. Mirrors
   -- runShrink in the generator, using only the reference start/candidate/observe.
-  minRunShrink :: (Timeline -> Min.Verdict) -> Int -> Min.ShrinkState -> Timeline
+  minRunShrink :: (Timeline -> Min.Verdict) -> Int -> Min.ShrinkState Decision -> Timeline
   minRunShrink _ 0 st = Min.best st
   minRunShrink oracle fuel st = case Min.candidate st of
     Nothing -> Min.best st
@@ -1113,7 +1165,93 @@ main = do
           ]
   tree ns =
     M.fromList [(T.pack (show i), O.File (T.pack (show n)) 1 False) | (i, n) <- zip [(0 :: Int) ..] ns]
-  minimize :: (Timeline -> Bool) -> Int -> Min.ShrinkState -> Timeline
+  scenarioLimits :: Sc.Limits
+  scenarioLimits = Sc.Limits 5000 30000 2 4 20480 600000
+  promptAction :: Int -> Sc.Action
+  promptAction i =
+    let t = fromIntegral i * 100
+     in Sc.Action
+          (T.pack ("p" ++ show i))
+          (Just t)
+          (Just (t + 50))
+          (Just (t + 600))
+          (Just (t + 600))
+          (Just "COMPLETED")
+          (Just "OK")
+          ""
+          (Just 0)
+          Nothing
+          False
+          0
+          (Just True)
+          []
+          1
+          512
+  -- A pseudo-random but deterministic observations document spanning every
+  -- stage of an action's life, seeded by a single number.
+  scenarioObservations :: Int -> Sc.Observations
+  scenarioObservations seed = Sc.Observations (map one [0 .. 7]) controls
+   where
+    pick :: Int -> Int -> Int
+    pick i m = fromIntegral (fst (nextSeed (fromIntegral (seed * 131 + i))) `mod` fromIntegral m)
+    -- shape: 0,1 ok; 2 stuck; 3 evicted; 4 queued; 5 throttled fetch failure
+    statusOf :: Int -> Maybe T.Text
+    statusOf 3 = Just "FAILED_PRECONDITION"
+    statusOf 5 = Just "ABORTED"
+    statusOf 2 = Nothing
+    statusOf 4 = Just "DEADLINE_EXCEEDED"
+    statusOf _ = Just "OK"
+    messageOf :: Int -> T.Text
+    messageOf 3 = "file was likely evicted from cache"
+    messageOf 5 = "Failed to start download from Azure"
+    messageOf _ = ""
+    kindOf :: Int -> T.Text
+    kindOf 0 = "store-full"
+    kindOf 1 = "store-pause"
+    kindOf 2 = "worker-pause"
+    kindOf _ = "store-throttle"
+    one :: Int -> Sc.Action
+    one i =
+      let submit = fromIntegral (pick i 20000)
+          shape = pick (i + 100) 6
+          executing = if shape == 4 then Nothing else Just (submit + fromIntegral (pick (i + 200) 25000))
+          anchor = executing <|> Just submit
+          done =
+            if shape `elem` [2, 4]
+              then Nothing
+              else fmap (+ fromIntegral (pick (i + 300) 30000)) anchor
+          lastSeen = done <|> fmap (+ fromIntegral (pick (i + 400) 50000)) anchor
+          stage
+            | isJust done = "COMPLETED" :: T.Text
+            | isJust executing = "EXECUTING"
+            | otherwise = "QUEUED"
+          present
+            | pick (i + 500) 3 == 0 = Just True
+            | pick (i + 500) 3 == 1 = Just False
+            | otherwise = Nothing
+       in Sc.Action
+            (T.pack ("a" ++ show i))
+            (Just submit)
+            executing
+            done
+            lastSeen
+            (Just stage)
+            (statusOf shape)
+            (messageOf shape)
+            (Just 0)
+            (Just "op")
+            (even i)
+            1
+            present
+            [fromIntegral (pick (i + 600) 60000) | pick (i + 700) 2 == 0]
+            1
+            (if pick (i + 800) 3 == 0 then 16384 else 2048)
+    controls =
+      [ Sc.Control (kindOf (pick 903 4)) start (start + fromIntegral (pick 901 60000))
+      | pick 900 2 == 0
+      , let start = fromIntegral (pick 902 30000)
+      ]
+  minimize :: (Timeline -> Bool) -> Int -> Min.ShrinkState Decision -> Timeline
   minimize _ 0 state = Min.best state
   minimize predicate fuel state = case Min.candidate state of
     Nothing -> Min.best state

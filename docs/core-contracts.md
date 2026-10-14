@@ -124,16 +124,44 @@ endpoints.
   the failure. Every generated candidate is strictly smaller under the
   termination measure (length, then summed severity), and an `Unknown` verdict
   never advances `best`.
-- **Core function.** `Rechaos.Core.Minimize.candidates`,
-  `Rechaos.Core.Minimize.observe`, `Rechaos.Core.Minimize.weaker`.
+- **Core function.** `Rechaos.Core.Shrink.candidates`,
+  `Rechaos.Core.Shrink.observe` (element-generic, parameterized by a caller's
+  strictly decreasing `weaker`), instantiated by `Rechaos.Core.Minimize.candidates`,
+  `Rechaos.Core.Minimize.observe`, `Rechaos.Core.Minimize.weaker` at gateway
+  decisions and by `Rechaos.Shell.Steps.weakerStep` at JSONL scenario steps
+  (halving a declared field toward its floor).
 - **Check-site.**
   `"minimizer removes irrelevant faults and shrinks to the failing threshold"`,
   `"every generated candidate is strictly smaller under the termination measure"`,
   `"minimizer only accepts confirmed reproductions"`,
-  `"candidate generation produces no intensity variant at the Truncate and Dribble caps"`.
+  `"candidate generation produces no intensity variant at the Truncate and Dribble caps"`,
+  and for the generic core
+  `"generic shrink candidates are strictly smaller under (length, sum)"`,
+  `"generic shrink converges to a 1-minimal witness for a threshold predicate"`,
+  `"generic shrink never advances on Unknown"`.
 - **Status.** Tested as property (deletion-1-minimality is established for the
   tested predicates; the general theorem is not yet machine-checked — a Lean-port
   target).
+
+## Scenario invariants
+
+### C7b. Scenario evaluation is total, deterministic, and order-independent
+
+- **Statement.** `evaluate` over any observations and limits terminates,
+  yields findings sorted by (signature, action) naming only observed actions,
+  is invariant under reordering of the actions, reports nothing for a fleet
+  that dispatches every action within the bound, and reports no queue-age or
+  executing finding when a control window covers the whole run.
+- **Core function.** `Rechaos.Core.Scenario.evaluate`.
+- **Check-site.** `"scenario evaluation is deterministic and independent of action order"`,
+  `"an idle fleet that dispatches every action within the bound is never a finding"`,
+  `"findings are sorted by signature then action and name only observed actions"`,
+  `"a control window covering a wait discounts it entirely"`; plus the
+  Python-versus-Haskell differential contract in `test/steps_contracts.py`
+  (`HaskellEvaluatorContracts`), which pins the case-by-case behavior to the
+  reference engine over random observations.
+- **Status.** Tested as property (the invariant statements themselves, 8-13 in
+  `invariants.md`, are not yet Lean theorems).
 
 ## Oracle
 

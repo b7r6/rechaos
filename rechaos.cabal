@@ -107,7 +107,9 @@ library
   exposed-modules:
     Rechaos.Core.Minimize
     Rechaos.Core.Oracle
+    Rechaos.Core.Scenario
     Rechaos.Core.Scheduler
+    Rechaos.Core.Shrink
     Rechaos.Core.Types
     Rechaos.Shell.Json
     Rechaos.Shell.Minimize
@@ -115,6 +117,8 @@ library
     Rechaos.Shell.Protocol
     Rechaos.Shell.Proxy
     Rechaos.Shell.Runtime
+    Rechaos.Shell.Scenario
+    Rechaos.Shell.Steps
     Rechaos.Shell.Wire
 
   build-depends:

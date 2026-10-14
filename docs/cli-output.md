@@ -7,7 +7,7 @@ change the emitter and then this page — nothing here is aspirational.
 
 ## The stdout / stderr contract
 
-Every terminal subcommand (`validate`, `verify-replay`, `oracle`, `minimize`)
+Every terminal subcommand (`validate`, `verify-replay`, `oracle`, `minimize`, `evaluate`, `validate-steps`)
 follows one rule:
 
 - **stdout is machine-readable.** It carries exactly the verdict object(s)
@@ -113,6 +113,24 @@ These codes match the dispatch in [`app/Main.hs`](../app/Main.hs): `Equivalent`
 returns normally (`0`), `Diverged` raises `ExitFailure 1`, and `Inconclusive`
 raises `ExitFailure 2`.
 
+## `evaluate` — scenario invariant findings
+
+`rechaos evaluate OBSERVATIONS` reads a scenario's `observations.json` (the
+actions, control windows, and limits a step engine recorded) and prints one
+report object: `findings` (each with `signature`, `action`, `kind`, `evidence`),
+`signatures` (the distinct signatures, sorted), and `actions` (the count
+observed). `--queue-age-ms`, `--executing-ms`, and `--download-budget-ms`
+override the recorded limits. Exit 0 whether or not there are findings; exit 2
+when the input is unreadable or lacks `limits`.
+
+## `validate-steps` — scenario step list check
+
+`rechaos validate-steps STEPS` reads a JSONL step list (or a JSON array of
+steps, as `dhall-to-json` renders) through the same fail-closed reader
+`minimize --steps` uses and prints `{"verdict":"valid","steps":N}`; a malformed
+`weaker` declaration or a non-object line fails on stderr with its line number
+and exit 2.
+
 ## `minimize` — the delta-debugging summary
 
 The `minimize` command emits a separate summary object from
@@ -131,12 +149,16 @@ when the search finishes and the final witness is confirmed:
 | Field | Type | Meaning |
 |---|---|---|
 | `status` | string | `"complete"` after exhausting candidates conclusively; `"inconclusive"` if an unresolved checker outcome remains for the final witness; `"trial-limit"` when it hit `--max-trials` before exhausting candidates. |
-| `faults` | number | Count of firing faults in the minimized witness written to `--output`. |
+| `faults` | number | Count of firing faults in the minimized witness written to `--output` (with `--steps`, the key is `steps` and counts retained steps). |
 | `checkerRuns` | number | Total number of checker subprocess invocations across all trials. |
 | `signature` | string | The exact failure signature that every retained trial preserved (the `--signature` argument). |
 
 The minimized timeline itself is written to the `--output` path; a per-trial
-evidence log is written to `<output>.trials.jsonl`. If the baseline or the final
+evidence log is written to `<output>.trials.jsonl`, one object per trial with
+the element count (`faults` or `steps`), the `verdict`, and the `candidate`
+that was tried. With `--steps` the input and output are JSONL step lists (see
+[`scheduler-chaos.md`](scheduler-chaos.md)) and the checker receives each
+candidate as `$RECHAOS_STEPS` instead of `$RECHAOS_TIMELINE`. If the baseline or the final
 witness fails to reproduce the signature, `minimize` fails on stderr with a
 non-zero exit and writes no summary object. `inconclusive` and `trial-limit`
 still write a repeatedly confirmed witness and exit 0; callers requiring

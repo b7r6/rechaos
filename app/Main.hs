@@ -12,7 +12,7 @@ module Main (main) where
 import Control.Concurrent (threadDelay)
 import Control.Exception
 import Control.Monad (unless, when)
-import Data.Aeson (encode)
+import Data.Aeson (encode, object, (.=))
 import Data.ByteString.Lazy.Char8 qualified as L
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
@@ -20,9 +20,11 @@ import Data.Version (showVersion)
 import Network.GRPC.Client qualified as C
 import Network.GRPC.Common (SslKeyLog (..), def)
 import Network.GRPC.Server.Run
+import Numeric.Natural (Natural)
 import Options.Applicative
 import Paths_rechaos (version)
 import Rechaos.Core.Oracle qualified as O
+import Rechaos.Core.Scenario (Limits (..))
 import Rechaos.Core.Scheduler (schedule, verifyReplay)
 import Rechaos.Core.Types
 import Rechaos.Shell.Json
@@ -30,6 +32,8 @@ import Rechaos.Shell.Minimize
 import Rechaos.Shell.Oracle
 import Rechaos.Shell.Proxy
 import Rechaos.Shell.Runtime
+import Rechaos.Shell.Scenario (evaluateFile)
+import Rechaos.Shell.Steps (readSteps)
 import System.Directory (canonicalizePath, createDirectoryIfMissing)
 import System.Exit
 import System.FilePath (takeDirectory)
@@ -56,8 +60,22 @@ data Command
   | Oracle FilePath FilePath
   | Schedule FilePath FilePath FilePath
   | Validate FilePath
-  | Minimize FilePath FilePath String String Int Int Int
+  | Minimize MinimizeInput FilePath String String Int Int Int
   | VerifyReplay FilePath FilePath
+  | Evaluate FilePath EvaluateOverrides
+  | ValidateSteps FilePath
+
+-- | Bounds that replace the ones recorded in an observations file.
+data EvaluateOverrides = EvaluateOverrides
+  { overrideQueueAgeMs :: Maybe Natural
+  , overrideExecutingMs :: Maybe Natural
+  , overrideDownloadBudgetMs :: Maybe Natural
+  }
+
+{- | What `minimize` shrinks: a recorded gateway fault timeline, or a scenario
+step list produced by a scheduler driver (see docs/scheduler-chaos.md).
+-}
+data MinimizeInput = TimelineInput FilePath | StepsInput FilePath
 
 -- Built from the cabal 'version:' field via the autogen Paths_rechaos module so
 -- it can never drift from the package metadata.
@@ -117,15 +135,47 @@ commandParser =
               <> "Exit codes: 0 covered, 2 uncovered/IO error."
           )
         <> command'
+          "evaluate"
+          ( Evaluate
+              <$> strArgument (metavar "OBSERVATIONS")
+              <*> ( EvaluateOverrides
+                      <$> optional
+                        (option auto (long "queue-age-ms" <> metavar "MS" <> help "override the recorded queue-age bound"))
+                      <*> optional
+                        (option auto (long "executing-ms" <> metavar "MS" <> help "override the recorded executing bound"))
+                      <*> optional
+                        ( option
+                            auto
+                            (long "download-budget-ms" <> metavar "MS" <> help "override the recorded download budget")
+                        )
+                  )
+          )
+          ( "Evaluate the scheduler and object-store invariants (8-13) over a scenario's observations.json. "
+              <> "stdout: JSON report with findings and signatures; stderr: chatter. "
+              <> "Exit codes: 0 evaluated (findings or not), 2 unreadable input."
+          )
+        <> command'
+          "validate-steps"
+          (ValidateSteps <$> strArgument (metavar "STEPS"))
+          ( "Validate a JSONL scenario step list (object per line, well-formed weaker declarations). "
+              <> "stdout: JSON verdict; stderr: chatter. "
+              <> "Exit codes: 0 valid, 2 invalid/IO error."
+          )
+        <> command'
           "minimize"
           ( Minimize
-              <$> optionFile "timeline" "Recorded fault timeline"
-              <*> optionFile "output" "Minimized JSONL timeline"
+              <$> ( TimelineInput
+                      <$> optionFile "timeline" "Recorded fault timeline"
+                        <|> StepsInput
+                      <$> optionFile "steps" "Scenario step list (JSONL)"
+                  )
+              <*> optionFile "output" "Minimized JSONL witness"
               <*> optionString
                 "check"
                 "CMD"
-                ( "Checker command, run via the shell (/bin/sh -c): reads the timeline path from "
-                    <> "$RECHAOS_TIMELINE and writes a JSON verdict to $RECHAOS_VERDICT "
+                ( "Checker command, run via the shell (/bin/sh -c): reads the candidate path from "
+                    <> "$RECHAOS_TIMELINE (with --timeline) or $RECHAOS_STEPS (with --steps) and "
+                    <> "writes a JSON verdict to $RECHAOS_VERDICT "
                     <> "(triggers / does-not-trigger plus a signature)."
                 )
               <*> optionString "signature" "SIG" "Exact failure signature to preserve"
@@ -265,8 +315,24 @@ run (VerifyReplay expected observed) = do
     Right () -> do
       hPutStrLn stderr "replay coverage verified"
       putVerdict "covered"
-run (Minimize input output checker signature repetitions seconds trials) =
+run (Evaluate path overrides) = do
+  report <- withPath ("observations " ++ path) (evaluateFile path override)
+  L.putStrLn (encode report)
+ where
+  override limits =
+    limits
+      { queueAgeMs = maybe (queueAgeMs limits) fromIntegral (overrideQueueAgeMs overrides)
+      , executingMs = maybe (executingMs limits) fromIntegral (overrideExecutingMs overrides)
+      , downloadBudgetMs = maybe (downloadBudgetMs limits) fromIntegral (overrideDownloadBudgetMs overrides)
+      }
+run (ValidateSteps path) = do
+  steps <- withPath ("steps " ++ path) (readSteps path)
+  hPutStrLn stderr ("steps valid: " ++ show (length steps))
+  L.putStrLn (encode (object ["verdict" .= ("valid" :: String), "steps" .= length steps]))
+run (Minimize (TimelineInput input) output checker signature repetitions seconds trials) =
   minimizeTimeline input output checker (T.pack signature) repetitions seconds trials
+run (Minimize (StepsInput input) output checker signature repetitions seconds trials) =
+  minimizeSteps input output checker (T.pack signature) repetitions seconds trials
 run (Oracle clean chaos) = do
   result <- compareTrees clean chaos
   hPutStrLn stderr $ case result of
