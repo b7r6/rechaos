@@ -23,6 +23,12 @@ the emitter modules themselves (see `putVerdict` in
 Exit codes carry the pass/fail bit so a script can branch without parsing JSON;
 the JSON carries the detail. The two never disagree.
 
+`serve` is not a terminal subcommand and writes nothing to stdout. Its stderr
+banner is three lines: `rechaos listening on HOST:PORT`, `decision log: FILE`,
+and `http2 rst-rate-limit: N/s per connection` (the `--rst-rate-limit` in
+force, default 1000; a client that sees `GOAWAY ENHANCE_YOUR_CALM` from the
+gateway has exceeded it).
+
 ## `validate` and `verify-replay` — the shared label verdict
 
 Both commands emit the single-label object produced by `verdictJSON` /

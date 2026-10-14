@@ -19,6 +19,8 @@ import Data.Text qualified as T
 import Data.Version (showVersion)
 import Network.GRPC.Client qualified as C
 import Network.GRPC.Common (SslKeyLog (..), def)
+import Network.GRPC.Common.HTTP2Settings (HTTP2Settings (..))
+import Network.GRPC.Server (mkGrpcServer)
 import Network.GRPC.Server.Run
 import Numeric.Natural (Natural)
 import Options.Applicative
@@ -54,6 +56,7 @@ data ServeOptions = ServeOptions
   , sparse :: Bool
   , record :: FilePath
   , maxSeconds :: Int
+  , rstRateLimit :: Int
   }
 data Command
   = Serve ServeOptions
@@ -244,6 +247,18 @@ serveOptions =
           <> showDefault
           <> help "Bound every RPC, including one without a client deadline"
       )
+    <*> option
+      auto
+      ( long "rst-rate-limit"
+          <> metavar "N"
+          <> value 1000
+          <> showDefault
+          <> help
+            ( "RST_STREAM frames per second a downstream connection may send before "
+                <> "the gateway closes it with GOAWAY ENHANCE_YOUR_CALM; a build client's "
+                <> "fan-out cancels far more streams than http2's default of 4"
+            )
+      )
 
 versioner :: Parser (a -> a)
 versioner =
@@ -355,6 +370,7 @@ run (Serve opts) = do
     fail (serveHint "ports must be in 1..65535")
   unless (maxSeconds opts > 0 && maxSeconds opts <= 86400) $
     fail (serveHint "max-call-seconds must be in 1..86400")
+  unless (rstRateLimit opts > 0) $ fail (serveHint "rst-rate-limit must be positive")
   when (sparse opts && isNothing (replayFile opts)) $ fail (serveHint "--sparse requires --replay")
   when (isJust (ca opts) && not (tlsUpstream opts)) $ fail (serveHint "--ca requires --upstream-tls")
   when (isJust (policyFile opts) && isJust (replayFile opts)) $
@@ -404,4 +420,17 @@ run (Serve opts) = do
       flip finally finish $ C.withConnection def{C.connReconnectPolicy = reconnect} server $ \connection -> do
         hPutStrLn stderr ("rechaos listening on " ++ host opts ++ ":" ++ show (port opts))
         hPutStrLn stderr ("decision log: " ++ record opts)
-        runServerWithHandlers def config (handlers runtime connection (maxSeconds opts))
+        hPutStrLn stderr ("http2 rst-rate-limit: " ++ show (rstRateLimit opts) ++ "/s per connection")
+        server <- mkGrpcServer def (handlers runtime connection (maxSeconds opts))
+        runServer http2Settings config server
+ where
+  -- n.b. http2 rate-limits RST_STREAM at 4/s per connection (CVE-2023-44487)
+  -- and answers excess with GOAWAY ENHANCE_YOUR_CALM "too many rst_stream".
+  -- A Bazel-like client multiplexes a build's RPCs on one connection and
+  -- cancels streams freely (a 21-action build drew 5 UNAVAILABLE retries
+  -- through the gateway; the same client direct to NativeLink saw none), so a
+  -- proxy keeps the limit, as a flood guard, but far above a build's cadence.
+  -- `runServerWithHandlers` pins the defaults; `mkGrpcServer` + `runServer`
+  -- is the path grapesy documents for overriding them.
+  http2Settings :: HTTP2Settings
+  http2Settings = def{http2OverrideRstRateLimit = Just (rstRateLimit opts)}

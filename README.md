@@ -61,6 +61,15 @@ increase it for long remote executions. Each run writes decisions to `--record`
 and RPC outcomes to `RECORD.outcomes.jsonl`. The proxy does not retry RPCs; it
 reconnects its upstream transport for subsequent calls after a disconnect.
 
+`--rst-rate-limit` (default 1000) is the number of `RST_STREAM` frames per
+second one downstream connection may send before the gateway closes it with
+`GOAWAY ENHANCE_YOUR_CALM` ("too many rst_stream"). The underlying `http2`
+library defaults to 4/s as a rapid-reset (CVE-2023-44487) guard, which a build
+client's fan-out exceeds under normal operation: a 21-action Bazel-like build
+drew five `UNAVAILABLE` retries through the gateway while the same client direct
+to NativeLink saw none. The guard stays on; the default is sized for a proxy
+that fronts one multiplexed build connection, not for a browser.
+
 ## Fault policy
 
 [`examples/fault-policy.json`](examples/fault-policy.json) is the complete
@@ -149,7 +158,7 @@ scenario shrinks to a deletion-1-minimal witness exactly as a fault timeline doe
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `serve` | Run the REAPI chaos gateway | `--upstream-host`, `--upstream-port`, `--host`, `--port`, `--policy`, `--replay`, `--sparse`, `--record`, `--max-call-seconds`, `--upstream-tls`, `--ca`, `--certificate`, `--key` |
+| `serve` | Run the REAPI chaos gateway | `--upstream-host`, `--upstream-port`, `--host`, `--port`, `--policy`, `--replay`, `--sparse`, `--record`, `--max-call-seconds`, `--rst-rate-limit`, `--upstream-tls`, `--ca`, `--certificate`, `--key` |
 | `oracle` | Compare completed build output trees (exit 0 equivalent, 1 diverged, 2 inconclusive) | `CLEAN_TREE`, `CHAOS_TREE` |
 | `schedule` | Recompute decisions from a recorded event trace | `--policy`, `--trace`, `--output` |
 | `validate` | Validate a policy JSON file | `POLICY` |
