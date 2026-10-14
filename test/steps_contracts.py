@@ -299,6 +299,15 @@ class HaskellEvaluatorContracts(unittest.TestCase):
             self.assertEqual(json.loads(json.dumps(report["findings"])), json.loads(json.dumps(expected)), name)
             self.assertTrue(expected or name == "refused-in-window", f"{name} should produce a finding")
 
+    def test_dhall_limits_match_the_python_derivation(self):
+        import shutil
+        if not shutil.which("dhall-to-json"):
+            self.skipTest("dhall-to-json not on PATH (dev shell has it; the wire sandbox does not)")
+        rendered = json.loads(subprocess.check_output(["dhall-to-json", "--file", str(ROOT / "dhall/examples/limits.dhall")]))
+        manifest = {"scheduler": {"max_action_executing_timeout_s": 0, "worker_timeout_s": 7},
+                    "worker": {"max_download_timeout_s": 45}, "workers": 2, "slots": 1, "memory_kb": 999}
+        self.assertEqual(rendered, ss.Limits.for_rig(manifest, queue_age_ms=6000).__dict__)
+
     def test_limit_overrides_apply(self):
         smalls = [action(f"s{i}", i * 200, executing=i * 200 + 30, done=i * 200 + 2000) for i in range(40)]
         large = action("L", 1000, executing=12000, done=12600, memory_kb=16384)

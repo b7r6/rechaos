@@ -74,6 +74,10 @@
               ./src ./scripts/gen-conformance.hs ./test/golden ./lean
             ];
           };
+          dhallSrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./dhall ./scripts/fleet_rig.py ];
+          };
           protoSrc = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [ ./proto ./generated ./scripts/generate-protos.sh ];
@@ -108,7 +112,7 @@
             latexmk -pdf -interaction=nonstopmode -halt-on-error rechaos.tex
             install -Dm444 rechaos.pdf "$out/rechaos.pdf"
           '';
-        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc protoSrc devSrc paper; };
+        in { inherit pkgs toolchain python package docsPackage haskellSrc sourceArchive pythonSrc conformanceSrc dhallSrc protoSrc devSrc paper; };
     in {
       packages = eachSystem (system:
         let b = build system;
@@ -204,6 +208,40 @@
             diff -ru committed generated
             touch "$out"
           '';
+          # Dhall gate: every typed definition type-checks offline and is
+          # dhall-format clean, every example scenario renders to a step list the
+          # reader accepts, and the rendered
+          # NativeLink fleet configs are byte-equivalent (as JSON) to what the
+          # Python rig emits, so the typed definitions and the emitter cannot drift.
+          dhall = b.pkgs.runCommand "rechaos-dhall" {
+            nativeBuildInputs = [ b.pkgs.dhall b.pkgs.dhall-json b.python ];
+          } ''
+            cd ${b.dhallSrc}
+            export XDG_CACHE_HOME="$TMPDIR/cache"
+            for f in dhall/*.dhall dhall/examples/*.dhall; do
+              dhall type --quiet --file "$f"
+              dhall format < "$f" | diff -q "$f" - > /dev/null || { echo "not dhall-format clean: $f"; exit 1; }
+            done
+            dhall-to-json --file dhall/examples/limits.dhall > /dev/null
+            for f in dhall/examples/scn-*.dhall; do
+              dhall-to-json --file "$f" > "$TMPDIR/steps.json"
+              ${b.package}/bin/rechaos validate-steps "$TMPDIR/steps.json" > /dev/null
+            done
+            dhall-to-json --file dhall/examples/fleet-config.dhall > "$TMPDIR/dhall-fleet.json"
+            dhall-to-json --file dhall/examples/fleet-config-redis-azure.dhall > "$TMPDIR/dhall-fleet-ra.json"
+            python3 -I scripts/fleet_rig.py config > "$TMPDIR/py-fleet.json"
+            python3 -I scripts/fleet_rig.py config --backend redis --cas-backend azure --workers 1 > "$TMPDIR/py-fleet-ra.json"
+            python3 -I - "$TMPDIR" <<'PY'
+            import json, sys
+            d = sys.argv[1]
+            for name in ("fleet", "fleet-ra"):
+                py = json.load(open(f"{d}/py-{name}.json"))
+                dh = json.load(open(f"{d}/dhall-{name}.json"))
+                if py != dh:
+                    sys.exit(f"dhall/NativeLink.dhall and scripts/fleet_rig.py disagree on {name}")
+            PY
+            touch "$out"
+          '';
           # Formatting gate: fourmolu must report no changes over the
           # hand-written sources, honoring ./fourmolu.yaml.
           format = b.pkgs.runCommand "rechaos-format" {
@@ -258,6 +296,7 @@
             b.toolchain.ghc b.python b.pkgs.protobuf b.pkgs.openssl
             b.pkgs.bazel_8 b.pkgs.jdk21_headless b.pkgs.cabal-install
             b.pkgs.ripgrep b.pkgs.haskellPackages.fourmolu b.pkgs.haskellPackages.hlint
+            b.pkgs.dhall b.pkgs.dhall-json
           ];
         }; });
     };
