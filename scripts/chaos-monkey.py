@@ -71,6 +71,14 @@ WAIT_EXECUTION = "build.bazel.remote.execution.v2.Execution/WaitExecution"
 CAPABILITIES = "build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
 BS_WRITE = "google.bytestream.ByteStream/Write"
 STAGE = {0: "UNKNOWN", 1: "CACHE_CHECK", 2: "QUEUED", 3: "EXECUTING", 4: "COMPLETED"}
+# n.b. The execution scenarios' command runs on the WORKER, which need not be an
+# FHS host: a NixOS worker has no /bin/true, so an action naming it "completes"
+# with exit 127 (11.7k such completions on one Azure node in a day) and the
+# scenario never exercises a real execution. /bin/sh is the one absolute path
+# every REAPI worker ships (NativeLink's own examples assume it) and `true` is a
+# shell builtin, so no PATH is needed. Constant for the run: the action digest
+# varies only with the salt.
+WORKER_NOOP = ["/bin/sh", "-c", "true"]
 
 # Reuse the adversarial Endpoint/Blob primitives from the stress harness.
 _spec = importlib.util.spec_from_file_location("fleet_stress", ROOT / "scripts" / "fleet-stress.py")
@@ -613,7 +621,7 @@ exec nix develop --command "${{RECHAOS_BIN:-./result/bin/rechaos}}" minimize \\
         plat = reapi.Platform(properties=[
             reapi.Platform.Property(name="OSFamily", value="linux"),
             reapi.Platform.Property(name="cpu_arch", value="x86_64")])
-        cmd = reapi.Command(arguments=["/bin/true"], platform=plat)
+        cmd = reapi.Command(arguments=WORKER_NOOP, platform=plat)
         cmd_d = self._upload_raw(cmd.SerializeToString())
         root_d = self._upload_raw(reapi.Directory().SerializeToString())
         action = reapi.Action(command_digest=cmd_d, input_root_digest=root_d,

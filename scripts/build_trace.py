@@ -215,7 +215,12 @@ class BuildGraph:
                         dep_outputs.append(dep.output)
                 inputs = private + chosen_shared + dep_outputs
                 output = Blob(instance, gid, f"{name}/out", _pick_size(rng))
-                cmd = ["/bin/true", "--target", name, "--layer", str(layer)]
+                # n.b. With --execute this runs on the WORKER, which need not be an
+                # FHS host (a NixOS worker has no /bin/true); /bin/sh is the one
+                # path every REAPI worker ships and `true` is a builtin. The trailing
+                # argv is ignored by `true` and only distinguishes targets' command
+                # digests.
+                cmd = ["/bin/sh", "-c", "true", "--target", name, "--layer", str(layer)]
                 t = Target(name, layer, inputs, deps, cmd, output)
                 targets.append(t)
                 by_layer[layer].append(t)

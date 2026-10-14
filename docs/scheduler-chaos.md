@@ -94,7 +94,7 @@ A scenario is JSON Lines, one object per step. Only integers are shrinkable;
 | Step | Fields | Effect |
 |---|---|---|
 | `blob` | `id`, `bytes`, `executable` | A deterministic input blob (content derived from a per-run nonce and the id), uploaded to the CAS before the scenario starts. `executable: true` stages it through the worker's executable "variant" path, which is what toolchain binaries take. |
-| `action` | `id`, `at_ms`, `cpu`, `memory_kb`, `sleep_ms`, `inputs` (blob ids), `detach`, `timeout_ms` | At `at_ms`, `Execute` an action whose command sleeps `sleep_ms`, with `cpu_count`/`memory_kb` platform properties and the named inputs in its root. `detach: true` cancels the `Execute` stream at the first `EXECUTING` and re-attaches later with `WaitExecution`. Inputs naming a deleted `blob` step are dropped, so deleting a blob means removing that input everywhere. |
+| `action` | `id`, `at_ms`, `cpu`, `memory_kb`, `sleep_ms`, `inputs` (blob ids), `detach`, `timeout_ms` | At `at_ms`, `Execute` an action whose command is `/bin/sh -c 'sleep <sleep_ms>'` (see "Worker-side commands" below), with `cpu_count`/`memory_kb` platform properties and the named inputs in its root. `detach: true` cancels the `Execute` stream at the first `EXECUTING` and re-attaches later with `WaitExecution`. Inputs naming a deleted `blob` step are dropped, so deleting a blob means removing that input everywhere. |
 | `store-full` | `at_ms`, `for_ms` | Cap the scheduler's Redis `maxmemory` at its current `used_memory` for `for_ms` (every further write is refused with `OOM`), then restore. Needs a Redis-backed rig. |
 | `store-pause` | `at_ms`, `for_ms` | `SIGSTOP` the Redis server for `for_ms` (a failover window), then `SIGCONT`. Needs a Redis-backed rig. |
 | `worker-pause` | `at_ms`, `for_ms`, `worker` | `SIGSTOP` one worker process for `for_ms`, then `SIGCONT`. |
@@ -202,6 +202,20 @@ The invariants and their signatures are catalogued as entries 8-13 in
 `action-failed-inputs-present:<CODE>`), `store-throttle-giveup`,
 `store-throttle-redispatch`. The observations also carry the proxy's per-key
 request counts (`store`) when the rig has an object-store CAS.
+
+### Worker-side commands
+
+Every command a scenario executes runs on the *worker*, which need not be an
+FHS host: a NixOS worker has no `/bin/true` or `/bin/sleep`, and an action
+naming one "completes" with exit 127 without exercising anything (11.7k such
+completions on one Azure soak node in a day). The scenarios therefore assume
+only what every REAPI worker ships, `/bin/sh` (NativeLink's own examples assume
+it too): the monkey's `--execution` scenarios run `/bin/sh -c true` (`true` is a
+shell builtin, so no `PATH` is needed) and the step engine's `action` runs
+`/bin/sh -c 'sleep N'` with an explicit `PATH` covering NixOS and FHS layouts
+(`scheduler_steps.WORKER_PATH`). No path is resolved on the controller and
+shipped to the worker. Both are constant for a run, so an action's digest
+varies only with its salt and the step's own fields.
 
 ## The monkey's scheduler mode
 
