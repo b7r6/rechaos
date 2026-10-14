@@ -49,6 +49,7 @@ import json
 import pathlib
 import random
 import re as rx
+import shlex
 import signal
 import sys
 import time
@@ -61,6 +62,9 @@ sys.path.insert(0, str(ROOT / "test"))
 from integration import proxy, rule, READ, WRITE, MISSING  # noqa: E402
 from integration import re as reapi, bs, grpc  # noqa: E402  proto modules + grpc
 from google.longrunning import operations_pb2 as oplr  # noqa: E402
+sys.path.insert(0, str(ROOT / "scripts"))
+import scheduler_steps as ss  # noqa: E402  scenario engine + pure invariant evaluator
+import fleet_rig  # noqa: E402
 
 EXECUTE = "build.bazel.remote.execution.v2.Execution/Execute"
 WAIT_EXECUTION = "build.bazel.remote.execution.v2.Execution/WaitExecution"
@@ -391,6 +395,7 @@ class Monkey:
         self.iteration = 0
         self.started = time.monotonic()
         self.stop = False
+        self.rig = json.loads(pathlib.Path(args.rig).read_text()) if args.rig else None
         self.direct = Endpoint(f"{args.host}:{args.port}")
         self.metrics_baseline = self._scrape_metrics()
         self.health = self._make_blob("health", 65537)
@@ -466,7 +471,7 @@ class Monkey:
         if w["status"] != "OK" or w.get("committedBytes") != blob.size:
             raise RuntimeError(f"setup upload failed for {blob.label}: {w}")
 
-    def finding(self, signature, kind, evidence, repro_dir=None):
+    def finding(self, signature, kind, evidence, repro_dir=None, steps=None):
         self.seen[signature] += 1
         self.finding_total += 1
         first = self.seen[signature] == 1
@@ -485,7 +490,42 @@ class Monkey:
                     src = pathlib.Path(repro_dir) / name
                     if src.exists():
                         (dest / name).write_bytes(src.read_bytes())
+            # Freeze a scheduler scenario (the steps witness, its evidence, the rig
+            # it ran on) plus a ready-to-run shrink recipe.
+            if steps is not None:
+                self._freeze_scenario(dest, signature, repro_dir, steps)
         return item
+
+    def _freeze_scenario(self, dest, signature, repro_dir, steps):
+        for name in ("steps.jsonl", "observations.json", "scenario.json"):
+            src = pathlib.Path(repro_dir) / name
+            if src.exists():
+                (dest / name).write_bytes(src.read_bytes())
+        (dest / "rig.json").write_text(json.dumps(self.rig, indent=2) + "\n")
+        limits = steps["limits"]
+        # One trial: the rig restart, the scenario, every bound an action may
+        # legitimately take to reach, the settle, and slack for a cold restart.
+        trial_seconds = (int(steps["duration_ms"] / 1000) + int(limits.queue_age_ms / 1000)
+                         + int(limits.executing_ms / 1000) + int(steps["control_ms"] / 1000)
+                         + int(limits.settle_ms / 1000) + 60)
+        checker = shlex.join(["python3", "scripts/scheduler_steps.py", "check", "--rig", str(dest / "rig.json"),
+                              "--signature", signature, "--fresh", *limits.as_args()])
+        script = f"""#!/usr/bin/env sh
+# Shrink the frozen scenario for '{signature}' to a minimal witness.
+# Needs: the rig processes named in rig.json (restarted fresh per trial by --fresh,
+# so NATIVELINK_BIN must resolve or rig.json's nativelink_bin must still exist),
+# and the rechaos dev shell for the Python checker (grpc + generated protos).
+# n.b. --fresh takes over the fleet rig.json names: do not run it while a monkey
+# is using that rig. The last trial's fleet is left running.
+set -eu
+cd {shlex.quote(str(ROOT))}
+exec nix develop --command "${{RECHAOS_BIN:-./result/bin/rechaos}}" minimize \\
+  --steps {shlex.quote(str(dest / 'steps.jsonl'))} --output {shlex.quote(str(dest / 'minimal.jsonl'))} \\
+  --signature {shlex.quote(signature)} --repetitions 2 --trial-timeout {trial_seconds} --max-trials 400 \\
+  --check {shlex.quote(checker)}
+"""
+        (dest / "minimize.sh").write_text(script)
+        (dest / "minimize.sh").chmod(0o755)
 
     # ---- invariant checks ------------------------------------------------ #
     def check_read_integrity(self, phase, endpoint, blob, repro=None, **kw):
@@ -726,6 +766,124 @@ class Monkey:
         self.scheduler_leak_check(scenario)
         return info
 
+    # ---- scheduler scenarios (needs --rig) ------------------------------- #
+    def scheduler_iteration(self, rng):
+        """Compose a random scheduler scenario from the dimensions the rig makes
+        available, replay it through the step engine, and evaluate invariants
+        8-13 on what was observed. The scenario is the witness: it is written as
+        steps.jsonl before it runs, so a finding freezes exactly what ran."""
+        rig = self.rig
+        if rig is None:
+            raise RuntimeError("scheduler mode needs --rig")
+        choose = lambda key, options: self.feedback.choose(self._feedback_rng, key, options)  # noqa: E731
+        capacity = rig["workers"] * rig["slots"]
+        # -- the base stream of small actions ---------------------------------- #
+        spacing_ms = choose("sched_spacing", [50, 100, 250, 500])
+        small_sleep_ms = choose("sched_small_sleep", [300, 800, 1500, 2500])
+        small_memory_kb = choose("sched_small_memory", [512, 1024, 2048, 4096])
+        count = capacity * choose("sched_stream_factor", [2, 4, 6])
+        count = min(count, max(8, 20000 // spacing_ms))        # keep a scenario under ~20 s of stream
+        # -- large actions competing for a mostly-full worker -------------------- #
+        large_count = choose("sched_large", [0, 1, 2])
+        large_fraction = choose("sched_large_fraction", [50, 75, 90])
+        # -- input cache pressure --------------------------------------------- #
+        pressure = choose("sched_cache_pressure", ["none", "mild", "heavy"])
+        # -- a control-plane fault, when the rig can serve one ------------------ #
+        faults = ["none"] + (["store-full", "store-pause"] if rig.get("redis") else []) + ["worker-pause"]
+        if rig.get("object_store"):
+            faults.append("store-throttle")
+        fault = choose("sched_fault", faults)
+        detach = choose("sched_detach", [0, 50, 100])
+        stream_ms = count * spacing_ms
+        steps, inputs = [], []
+        cache = rig["worker_cache_bytes"]
+        # n.b. Everything a scenario uploads lands in the scheduler's CAS, which
+        # evicts too. Keep one scenario's volume under a quarter of the CAS so the
+        # monkey's health blob (invariant 6) is never evicted by the scenario's
+        # own inputs; that would be a finding about the rig, not the scheduler.
+        cas_budget = rig.get("params", {}).get("cas_bytes", 2_000_000_000) // 4
+        if fault == "store-throttle" and pressure == "none":
+            pressure = "mild"          # a throttle needs inputs that must be fetched from the store
+        if pressure != "none":
+            tool_bytes = min(int(cache * (0.5 if pressure == "mild" else 0.8)), cas_budget // 2)
+            tools = max(1, min(8, tool_bytes // 400_000))
+            per_tool = tool_bytes // tools
+            for t in range(tools):
+                # Shared tools are executables: the staging path toolchain binaries take.
+                steps.append({"step": "blob", "id": f"tool{t}", "bytes": per_tool, "executable": True,
+                              "weaker": {"bytes": 1}})
+                inputs.append(f"tool{t}")
+            unique_bytes = min(int(cache * (0.1 if pressure == "mild" else 0.2)), (cas_budget // 2) // max(1, count))
+        else:
+            unique_bytes = 0
+        for i in range(count):
+            action_inputs = list(inputs)
+            if unique_bytes:
+                steps.append({"step": "blob", "id": f"u{i:03d}", "bytes": unique_bytes, "weaker": {"bytes": 1}})
+                action_inputs.append(f"u{i:03d}")
+            steps.append({"step": "action", "id": f"s{i:03d}", "at_ms": i * spacing_ms, "cpu": 1,
+                          "memory_kb": small_memory_kb, "sleep_ms": small_sleep_ms, "inputs": action_inputs,
+                          "detach": rng.randint(1, 100) <= detach, "weaker": {"sleep_ms": 0}})
+        for j in range(large_count):
+            at = rng.randint(min(stream_ms, 2000), max(min(stream_ms, 2000), stream_ms // 2))
+            steps.append({"step": "action", "id": f"L{j}", "at_ms": at, "cpu": 1,
+                          "memory_kb": rig["memory_kb"] * large_fraction // 100, "sleep_ms": 500,
+                          "inputs": list(inputs), "weaker": {"sleep_ms": 0}})
+        fault_end = 0
+        if fault != "none":
+            at = rng.randint(500, max(500, stream_ms // 2))
+            # A throttle has to outlast the client's own retry budget (about 38 s
+            # with a 6-retry client) to tell giving up from waiting it out.
+            for_ms = (choose("sched_throttle_for", [20000, 45000, 70000]) if fault == "store-throttle"
+                      else choose("sched_fault_for", [2000, 5000, 10000]))
+            executing_s = rig["scheduler"].get("max_action_executing_timeout_s", 0)
+            if fault == "store-throttle" and executing_s:
+                for_ms = min(for_ms, executing_s * 1000)   # see validate_steps in scheduler_steps.py
+            step = {"step": fault, "at_ms": at, "for_ms": for_ms, "weaker": {"for_ms": 100}}
+            if fault == "worker-pause":
+                step["worker"] = rng.randrange(rig["workers"])
+            if fault == "store-throttle":
+                step["ops"] = "GET"
+            steps.append(step)
+            fault_end = at + for_ms
+        # -- trailing probes: the fleet must still accept a fleet's worth of work -- #
+        probe_at = max(stream_ms, fault_end) + 1000
+        for k in range(capacity):
+            steps.append({"step": "action", "id": f"p{k:02d}", "at_ms": probe_at + k * 20, "cpu": 1,
+                          "memory_kb": 256, "sleep_ms": 200, "inputs": [], "weaker": {"sleep_ms": 0}})
+        limits = ss.Limits.for_rig(rig, queue_age_ms=small_sleep_ms + 3000)
+        duration_ms = probe_at + capacity * 20 + 200
+        self._last_choices = {"mode": "scheduler", "sched_fault": fault, "sched_cache_pressure": pressure,
+                              "sched_large": str(large_count), "sched_detach": str(detach)}
+        idir = self.out / "iters" / f"{self.iteration:06d}"
+        idir.mkdir(parents=True, exist_ok=True)
+        ss.write_steps(idir / "steps.jsonl", steps)
+        scenario = {"seed": self.seed, "iteration": self.iteration, "limits": limits.__dict__,
+                    "knobs": {"spacing_ms": spacing_ms, "small_sleep_ms": small_sleep_ms,
+                              "small_memory_kb": small_memory_kb, "count": count, "large_count": large_count,
+                              "large_fraction": large_fraction, "pressure": pressure, "fault": fault,
+                              "detach_percent": detach}, "duration_ms": duration_ms}
+        (idir / "scenario.json").write_text(json.dumps(scenario, indent=2) + "\n")
+        info = {"mode": "scheduler", "scenario": f"{fault}/{pressure}/L{large_count}", "steps": len(steps),
+                "knobs": scenario["knobs"]}
+        control_ms = sum(int(s.get("for_ms", 0)) for s in steps if s["step"] in ss.CONTROL_STEPS)
+        try:
+            observations, findings = ss.run_scenario(steps, rig, limits, idir)
+        except (ss.StepError, RuntimeError) as e:
+            # Inconclusive is not a finding: the scenario did not adjudicate.
+            info["inconclusive"] = f"{type(e).__name__}: {e}"[:500]
+            print(f"  -- inconclusive: {info['inconclusive'][:160]}", flush=True)
+            if not fleet_rig.healthy(rig):
+                print("  rig is no longer healthy; stopping the campaign", flush=True)
+                self.stop = True
+            return info
+        info["signatures"] = ss.signatures(findings)
+        info["actions"] = len(observations["actions"])
+        for f in findings:
+            self.finding(f["signature"], f["kind"], {"action": f["action"], **f["evidence"], "iteration_dir": str(idir)},
+                         repro_dir=idir, steps={"limits": limits, "duration_ms": duration_ms, "control_ms": control_ms})
+        return info
+
     # ---- iteration modes ------------------------------------------------- #
     def proxy_iteration(self, rng):
         op = self.feedback.choose(self._feedback_rng, "proxy_op", ["read", "write", "missing"])
@@ -849,7 +1007,14 @@ class Monkey:
             return ["direct"]
         if self.args.only_proxy:
             return ["proxy"]
-        return ["proxy", "direct", "execution"] if self.args.execution else ["proxy", "direct"]
+        if self.args.only_scheduler:
+            return ["scheduler"]
+        modes = ["proxy", "direct"]
+        if self.args.execution:
+            modes.append("execution")
+        if self.rig is not None:
+            modes.append("scheduler")
+        return modes
 
     def _coverage_signature(self, info, new_sigs, before_metrics, after_metrics):
         """Fold (fault-kind, method/op, direction, outcome, moved-metric-family buckets,
@@ -892,6 +1057,7 @@ class Monkey:
         t0 = time.monotonic()
         try:
             info = (self.execution_iteration(rng) if mode == "execution" else
+                    self.scheduler_iteration(rng) if mode == "scheduler" else
                     self.proxy_iteration(rng) if mode == "proxy" else
                     self.direct_iteration(rng))
             info["error"] = None
@@ -1046,6 +1212,9 @@ def main():
     p.add_argument("--execution", action="store_true",
                    help="mix in Execution/scheduler stress (needs an endpoint exposing the Execution service)")
     p.add_argument("--only-execution", action="store_true", help="run only Execution/scheduler stress")
+    p.add_argument("--rig", default="", help="fleet rig manifest (scripts/fleet_rig.py rig.json): enables the "
+                   "scheduler scenario mode and takes host/port/instance from the rig")
+    p.add_argument("--only-scheduler", action="store_true", help="run only rig-driven scheduler scenarios (needs --rig)")
     p.add_argument("--metrics-port", type=int, default=0, help="Prometheus port (default: --port)")
     p.add_argument("--store-metric",
                    default=r"action_db_operation_ids_([0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12})",
@@ -1079,8 +1248,13 @@ def main():
     p.add_argument("--proc-pid", type=int, default=0,
                    help="optional PID of a co-located server to read RSS/FD from /proc (0 = skip)")
     args = p.parse_args()
-    if sum(bool(x) for x in (args.only_proxy, args.only_direct, args.only_execution)) > 1:
-        p.error("choose at most one of --only-proxy / --only-direct / --only-execution")
+    if sum(bool(x) for x in (args.only_proxy, args.only_direct, args.only_execution, args.only_scheduler)) > 1:
+        p.error("choose at most one of --only-proxy / --only-direct / --only-execution / --only-scheduler")
+    if args.only_scheduler and not args.rig:
+        p.error("--only-scheduler needs --rig")
+    if args.rig:
+        rig = json.loads(pathlib.Path(args.rig).read_text())
+        args.host, args.port, args.instance = rig["host"], rig["port"], rig["instance"]
     if not args.metrics_port:
         args.metrics_port = args.port
     Monkey(args).run()

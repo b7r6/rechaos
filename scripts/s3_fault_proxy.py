@@ -20,7 +20,8 @@ run is reproducible.
 Fault menu (each independently configurable; see ``--help``):
 
   * latency      -- sleep before forwarding (adds request-side delay)
-  * slowdown     -- return 503 ``SlowDown`` (S3/R2 throttle signal) without
+  * slowdown     -- return the dialect's throttle error (S3 ``SlowDown``, Azure
+                    ``ServerBusy``, GCS ``backendError``) without
                     contacting upstream; also supports 429 / 500 / 503 generic
   * truncate     -- forward upstream headers, then send only the first N bytes of
                     the body and close (partial / short read)
@@ -65,6 +66,7 @@ Design notes:
 import argparse
 import http.server
 import io
+import json
 import random
 import socket
 import socketserver
@@ -76,6 +78,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from xml.sax.saxutils import escape
 
 # S3 operations we classify and can target.
@@ -102,6 +105,58 @@ def parse_hostport(s, default_port):
     return s, default_port
 
 
+# ---------------------------------------------------------------------------
+# Object-store dialects. Each hyperscaler throttles with its own status, headers,
+# and error body, and its client SDK keys its retry/backoff on exactly those, so
+# a throttle that is not byte-faithful to the dialect exercises nothing. The
+# shapes here are the documented ones:
+#   S3    503 <Error><Code>SlowDown</Code>...            (x-amz-request-id)
+#   Azure 503 x-ms-error-code: ServerBusy, XML body with "Egress is over the
+#         account limit." (or Ingress / Operations per second)
+#   GCS   503/429 JSON {"error":{"code":..,"errors":[{"reason":"backendError"}]}}
+# ---------------------------------------------------------------------------
+DIALECTS = {
+    "s3": {"status": 503, "code": "SlowDown", "message": "Please reduce your request rate.",
+           "strip": 0},
+    "azure": {"status": 503, "code": "ServerBusy", "message": "Egress is over the account limit.",
+              "strip": 2},
+    "gcs": {"status": 503, "code": "backendError", "message": "Backend Error", "strip": 0},
+}
+
+
+def error_response(dialect, status, code, message, key, retry_after, request_id):
+    """(content_type, extra_headers, body) for a throttle/error in a dialect."""
+    if dialect == "azure":
+        body = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            f"<Error><Code>{escape(code)}</Code>"
+            f"<Message>{escape(message)}\nRequestId:{request_id}\nTime:{_iso_now()}</Message></Error>"
+        ).encode("utf-8")
+        headers = [("x-ms-error-code", code), ("x-ms-request-id", request_id),
+                   ("x-ms-version", "2025-01-05")]
+        if retry_after:
+            headers.append(("Retry-After", str(retry_after)))
+        return "application/xml", headers, body
+    if dialect == "gcs":
+        payload = {"error": {"code": status, "message": message,
+                             "errors": [{"message": message, "domain": "global" if code != "rateLimitExceeded" else "usageLimits",
+                                         "reason": code}]}}
+        body = json.dumps(payload).encode("utf-8")
+        headers = []
+        if retry_after:
+            headers.append(("Retry-After", str(retry_after)))
+        return "application/json; charset=UTF-8", headers, body
+    body = s3_error_xml(code, message, key)
+    headers = [("x-amz-request-id", request_id)]
+    if retry_after:
+        headers.append(("Retry-After", str(retry_after)))
+    return "application/xml", headers, body
+
+
+def _iso_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S.0000000Z", time.gmtime())
+
+
 class FaultConfig:
     """Immutable-ish bundle of fault parameters, built from argparse."""
 
@@ -113,8 +168,14 @@ class FaultConfig:
         self.upstream_scheme = parsed.scheme
         self.upstream_netloc = parsed.netloc
         self.upstream_path = parsed.path.rstrip("/")  # base path prefix, usually ""
-        self.strip = args.strip  # path segments to drop for key/prefix matching
+        self.dialect = args.dialect
+        if self.dialect not in DIALECTS:
+            raise ValueError(f"--dialect must be one of {sorted(DIALECTS)}, got {args.dialect!r}")
+        # path segments to drop for key/prefix matching; the dialect's path style
+        # sets the default (Azurite is /account/container/key)
+        self.strip = DIALECTS[self.dialect]["strip"] if args.strip is None else args.strip
         self.timeout = args.upstream_timeout
+        self.retry_after = args.retry_after
         self.seed = args.seed
         self.verbose = args.verbose
 
@@ -126,8 +187,9 @@ class FaultConfig:
         self.slowdown_ops = _opset(args.slowdown_ops)
         self.slowdown_prob = args.slowdown_prob
         self.slowdown_prefix = args.slowdown_prefix
-        self.slowdown_status = args.slowdown_status
-        self.slowdown_code = args.slowdown_code
+        self.slowdown_status = args.slowdown_status or DIALECTS[self.dialect]["status"]
+        self.slowdown_code = args.slowdown_code or DIALECTS[self.dialect]["code"]
+        self.slowdown_message = args.slowdown_message or DIALECTS[self.dialect]["message"]
 
         self.truncate_ops = _opset(args.truncate_ops)
         self.truncate_prob = args.truncate_prob
@@ -169,8 +231,12 @@ def _opset(csv):
     return frozenset(out)
 
 
-def classify(method, path, query):
-    """Map an HTTP request to an S3 operation name."""
+def classify(method, path, query, dialect="s3"):
+    """Map an HTTP request to an object-store operation name in a dialect."""
+    if dialect == "azure":
+        return classify_azure(method, path, query)
+    if dialect == "gcs":
+        return classify_gcs(method, path, query)
     method = method.upper()
     if method == PUT:
         return PUT
@@ -189,10 +255,50 @@ def classify(method, path, query):
     return method  # anything exotic (POST multipart etc.) passes through by its verb
 
 
-def object_key(path, strip):
+def classify_azure(method, path, query):
+    """Azure Blob REST: blobs live at /{account}/{container}/{blob} on an emulator
+    (or /{container}/{blob} on a real account host). Block uploads are PUTs with
+    ?comp=block|blocklist; container/blob listing is ?comp=list."""
+    method = method.upper()
+    q = urllib.parse.parse_qs(query)
+    comp = (q.get("comp") or [""])[0].lower()
+    if method == GET and comp == "list":
+        return LIST
+    if method in (GET, HEAD, DELETE):
+        return method
+    if method == PUT:
+        return PUT
+    return method
+
+
+def classify_gcs(method, path, query):
+    """GCS JSON API: /storage/v1/b/{bucket}/o/{object}?alt=media and
+    /download/storage/v1/... read objects; /upload/storage/v1/... writes them;
+    /storage/v1/b/{bucket}/o without an object lists; a metadata GET (no
+    alt=media) is treated as HEAD."""
+    method = method.upper()
+    q = urllib.parse.parse_qs(query)
+    if path.startswith("/upload/"):
+        return PUT
+    if method == DELETE:
+        return DELETE
+    if method in (GET, HEAD):
+        if "/o/" not in path and path.rstrip("/").endswith("/o"):
+            return LIST
+        if path.startswith("/download/") or (q.get("alt") or [""])[0] == "media":
+            return GET
+        return HEAD if "/o/" in path else LIST
+    if method in (PUT, "POST", "PATCH"):
+        return PUT
+    return method
+
+
+def object_key(path, strip, dialect="s3"):
     """Derive the object key used for prefix matching: drop the leading slash and,
     if requested, the first ``strip`` path segments (e.g. a bucket segment in a
-    path-style endpoint)."""
+    path-style endpoint). GCS names the object after /o/, URL-encoded."""
+    if dialect == "gcs" and "/o/" in path:
+        return urllib.parse.unquote(path.split("/o/", 1)[1])
     parts = path.lstrip("/").split("/")
     if strip:
         parts = parts[strip:]
@@ -224,6 +330,15 @@ def decide(cfg, rng, op, key, counter):
     latency_ms = 0
     if op in cfg.latency_ops and _match(cfg.latency_prefix, key) and rng.random() < cfg.latency_prob:
         latency_ms = cfg.latency_ms
+
+    # A throttle switched on through the control endpoint applies to every
+    # matching request until switched off: a sustained account-level throttle,
+    # not a sampled one. The scenario engine drives this for its store-throttle step.
+    forced = Control.forced
+    if forced is not None and op in forced["ops"] and _match(forced.get("prefix", ""), key):
+        return latency_ms, Decision("slowdown", {"status": forced["status"], "code": forced["code"],
+                                                 "message": forced["message"], "via": "control",
+                                                 "retry_after": forced["retry_after"]})
 
     # Deterministic error burst: every window of burst_every requests begins a run
     # of burst_len failures. Uses the request counter, not the RNG, so it is exact.
@@ -326,10 +441,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cfg = self.cfg
         counter = self._next_counter()
         parsed = urllib.parse.urlsplit(self.path)
-        op = classify(method, parsed.path, parsed.query)
-        key = object_key(parsed.path, cfg.strip)
+        op = classify(method, parsed.path, parsed.query, cfg.dialect)
+        key = object_key(parsed.path, cfg.strip, cfg.dialect)
         rng = random.Random(f"{cfg.seed}:{counter}")
         latency_ms, decision = decide(cfg, rng, op, key, counter)
+        Control.record(op, key, decision.kind)
 
         if cfg.verbose:
             sys.stderr.write(
@@ -492,17 +608,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 time.sleep(delay)
 
     def _emit_slowdown(self, decision, key):
+        cfg = self.cfg
         status = decision.detail["status"]
         code = decision.detail["code"]
-        payload = s3_error_xml(code, f"{code} injected by rechaos s3_fault_proxy "
-                               f"({decision.detail.get('via', 'prob')})", key)
+        message = decision.detail.get("message") or cfg.slowdown_message
+        retry_after = decision.detail.get("retry_after", cfg.retry_after)
+        request_id = uuid.uuid4().hex[:32]
+        content_type, headers, payload = error_response(
+            cfg.dialect, status, code, message, key, retry_after, request_id)
         self.send_response(status)
-        self.send_header("Content-Type", "application/xml")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        # S3/R2 attach a Retry-After hint on throttles; emit a small one so the
-        # client's backoff path is exercised.
-        self.send_header("Retry-After", "1")
-        self.send_header("x-rechaos-fault", f"slowdown:{code}")
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("x-rechaos-fault", f"slowdown:{code}:{decision.detail.get('via', 'prob')}")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -515,6 +634,120 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("x-rechaos-fault", "upstream-error")
         self.end_headers()
         self.wfile.write(payload)
+
+
+class Control:
+    """Server-wide switchable throttle and per-key statistics, driven by the
+    control endpoint (`--control`). All access is under one lock."""
+    lock = threading.Lock()
+    forced = None                     # {"ops": set, "status", "code", "message", "retry_after", "prefix"}
+    requests = 0
+    by_op = {}
+    by_key = {}                       # key -> {"requests", "throttled", "served"}
+
+    @classmethod
+    def record(cls, op, key, kind):
+        with cls.lock:
+            cls.requests += 1
+            cls.by_op[op] = cls.by_op.get(op, 0) + 1
+            entry = cls.by_key.setdefault(key, {"requests": 0, "throttled": 0, "served": 0})
+            entry["requests"] += 1
+            entry["throttled" if kind == "slowdown" else "served"] += 1
+
+    @classmethod
+    def snapshot(cls):
+        with cls.lock:
+            keys = sorted(cls.by_key.items(), key=lambda kv: (-kv[1]["requests"], kv[0]))
+            return {"requests": cls.requests, "by_op": dict(cls.by_op),
+                    "throttle": None if cls.forced is None else {**cls.forced, "ops": sorted(cls.forced["ops"])},
+                    "keys": len(cls.by_key),
+                    "top_keys": [{"key": k, **v} for k, v in keys[:200]]}
+
+    @classmethod
+    def reset(cls):
+        """Clear the counters and any forced throttle: a reset is a clean slate."""
+        with cls.lock:
+            cls.requests, cls.by_op, cls.by_key = 0, {}, {}
+            cls.forced = None
+
+    @classmethod
+    def set_throttle(cls, cfg, body):
+        """Validate a control body before it can reach the data path: a bad
+        value here would otherwise fail every request until switched off."""
+        def text(name, default):
+            value = body.get(name, default)
+            if not isinstance(value, str) or any(ord(c) < 0x20 or c == "\x7f" for c in value):
+                raise ValueError(f"{name} must be a string without control characters")
+            return value
+        if not isinstance(body, dict):
+            raise ValueError("control body must be a JSON object")
+        with cls.lock:
+            if not body.get("on", True):
+                cls.forced = None
+                return None
+            ops = body.get("ops", "GET")
+            if isinstance(ops, list):
+                if not all(isinstance(op, str) for op in ops):
+                    raise ValueError("ops must be a string or a list of strings")
+                ops = ",".join(ops)
+            if not isinstance(ops, str):
+                raise ValueError("ops must be a string or a list of strings")
+            status = body.get("status", cfg.slowdown_status)
+            retry_after = body.get("retry_after", cfg.retry_after)
+            if not isinstance(status, int) or isinstance(status, bool) or not 400 <= status <= 599:
+                raise ValueError("status must be an integer in 400..599")
+            if not isinstance(retry_after, int) or isinstance(retry_after, bool) or retry_after < 0:
+                raise ValueError("retry_after must be a non-negative integer")
+            cls.forced = {
+                "ops": set(_opset(ops)),
+                "status": status,
+                "code": text("code", cfg.slowdown_code),
+                "message": text("message", cfg.slowdown_message),
+                "retry_after": retry_after,
+                "prefix": text("prefix", ""),
+            }
+            return {**cls.forced, "ops": sorted(cls.forced["ops"])}
+
+
+class ControlHandler(http.server.BaseHTTPRequestHandler):
+    """GET /stats, POST /throttle {"on":bool,"ops":"GET","status":503,"code":..,
+    "message":..,"retry_after":1,"prefix":""}, POST /reset."""
+    protocol_version = "HTTP/1.1"
+    cfg = None
+
+    def log_message(self, format, *args):  # noqa: A002  the base class names it so
+        pass
+
+    def _json(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if urllib.parse.urlsplit(self.path).path == "/stats":
+            return self._json(200, Control.snapshot())
+        self._json(404, {"error": "unknown control path"})
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError as e:
+            return self._json(400, {"error": f"bad JSON: {e}"})
+        if path == "/throttle":
+            try:
+                return self._json(200, {"throttle": Control.set_throttle(self.cfg, body)})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+        if path == "/reset":
+            Control.reset()
+            return self._json(200, {"reset": True})
+        self._json(404, {"error": "unknown control path"})
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -531,9 +764,17 @@ def build_parser():
     p.add_argument("--upstream", required=True,
                    help="base URL of the real object store, e.g. "
                         "https://<ACCOUNT>.r2.cloudflarestorage.com or http://127.0.0.1:9000")
-    p.add_argument("--strip", type=int, default=0,
-                   help="path segments to drop when computing the object key for "
-                        "prefix matching (use 1 for path-style '/<bucket>/<key>')")
+    p.add_argument("--dialect", default="s3", choices=sorted(DIALECTS),
+                   help="object-store dialect: request classification and the exact throttle "
+                        "status/headers/body the store's SDK keys its backoff on")
+    p.add_argument("--strip", type=int, default=None,
+                   help="path segments to drop when computing the object key for prefix matching "
+                        "(default by dialect: 0, or 2 for Azure's /account/container/key)")
+    p.add_argument("--control", default="",
+                   help="host:port for the control endpoint (GET /stats, POST /throttle, POST /reset); "
+                        "off when empty")
+    p.add_argument("--retry-after", type=int, default=1,
+                   help="Retry-After seconds attached to throttles (0 = no header)")
     p.add_argument("--upstream-timeout", type=float, default=30.0,
                    help="seconds to wait on the upstream object store")
     p.add_argument("--seed", type=int, default=1,
@@ -550,9 +791,13 @@ def build_parser():
     g.add_argument("--slowdown-ops", default="", help="comma list of ops to throttle")
     g.add_argument("--slowdown-prob", type=float, default=1.0, help="probability [0,1]")
     g.add_argument("--slowdown-prefix", default="", help="only keys under this prefix")
-    g.add_argument("--slowdown-status", type=int, default=503, help="HTTP status to return")
-    g.add_argument("--slowdown-code", default="SlowDown",
-                   help="S3 <Code> in the XML body (SlowDown, TooManyRequests, InternalError, ...)")
+    g.add_argument("--slowdown-status", type=int, default=0, help="HTTP status to return (0 = dialect default)")
+    g.add_argument("--slowdown-code", default="",
+                   help="error code: S3 <Code> (SlowDown, TooManyRequests, ...), Azure x-ms-error-code "
+                        "(ServerBusy, OperationTimedOut, ...), GCS reason (backendError, rateLimitExceeded); "
+                        "empty = dialect default")
+    g.add_argument("--slowdown-message", default="",
+                   help="error message (empty = dialect default, e.g. Azure 'Egress is over the account limit.')")
 
     g = p.add_argument_group("truncate (short/partial body then close)")
     g.add_argument("--truncate-ops", default="", help="comma list of ops to truncate (usually GET)")
@@ -585,14 +830,20 @@ def build_parser():
     return p
 
 
-def serve(cfg, listen_host, listen_port):
+def serve(cfg, listen_host, listen_port, control=None):
     Handler.cfg = cfg
     Handler._counter = 0
+    ControlHandler.cfg = cfg
     httpd = ThreadingHTTPServer((listen_host, listen_port), Handler)
     actual = httpd.server_address
     sys.stderr.write(
-        f"rechaos s3_fault_proxy listening on {actual[0]}:{actual[1]} "
+        f"rechaos s3_fault_proxy[{cfg.dialect}] listening on {actual[0]}:{actual[1]} "
         f"-> {cfg.upstream} (seed={cfg.seed})\n")
+    if control:
+        control_server = ThreadingHTTPServer(control, ControlHandler)
+        threading.Thread(target=control_server.serve_forever, kwargs={"poll_interval": 0.2},
+                         daemon=True).start()
+        sys.stderr.write(f"rechaos s3_fault_proxy control on {control[0]}:{control[1]}\n")
     sys.stderr.flush()
     try:
         httpd.serve_forever()
@@ -611,7 +862,8 @@ def main(argv=None):
     except ValueError as e:
         parser.error(str(e))
     host, port = parse_hostport(args.listen, 8081)
-    serve(cfg, host, port)
+    control = parse_hostport(args.control, 8082) if args.control else None
+    serve(cfg, host, port, control)
     return 0
 
 

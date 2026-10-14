@@ -37,6 +37,29 @@ see the [top-level README](../../README.md) and the
 See [S3 faults](../../docs/s3-faults.md) and each config's schema/environment
 comments. Schema compatibility depends on the NativeLink build being tested.
 
+## The fleet rig (scheduler scenarios)
+
+The configs above are single-process. The scheduler invariants (8-11 in
+[`docs/invariants.md`](../../docs/invariants.md)) need separate worker
+processes with their own input caches and platform properties, and optionally a
+Redis the scheduler stores its state in. [`scripts/fleet_rig.py`](../../scripts/fleet_rig.py)
+generates those configs from parameters instead of shipping templates:
+
+```sh
+# Print the generated scheduler and worker configs without starting anything.
+python3 scripts/fleet_rig.py config --backend redis --workers 3 --slots 4 --memory-kb 20480 --worker-cache-bytes 8000000
+# Start the fleet (free ports), write runs/rig/rig.json, and return.
+NATIVELINK_BIN=/path/to/nativelink python3 scripts/fleet_rig.py up --backend redis --workers 3 --out runs/rig --detach
+```
+
+Add `--cas-backend azure` (Azurite) or `--cas-backend s3` (MinIO) to put the
+CAS behind the object-store dialect proxy, with
+`--max-action-executing-timeout-s 0` so a throttle scenario is conclusive.
+
+`rig.json` is what the chaos monkey (`--rig`), `scripts/scheduler_steps.py`,
+and a frozen finding's `minimize.sh` read. See
+[`docs/scheduler-chaos.md`](../../docs/scheduler-chaos.md).
+
 ## Launch a local endpoint
 
 Pick the config for the behavior you want to reproduce and launch NativeLink

@@ -147,6 +147,170 @@ fault policies that produce the faulted traffic, see
   or the store still holds entries after a full quiet drain with no clients
   present.
 
+## Scheduler liveness invariants (fleet rig)
+
+Invariants 8 through 11 are checked by the chaos monkey's scheduler mode
+(`--rig`) and by `scripts/scheduler_steps.py` directly. They need a fleet with
+real workers, which [`scripts/fleet_rig.py`](../scripts/fleet_rig.py) starts
+locally; the bounds come from the rig manifest (the scheduler's own timeouts)
+and from the scenario (the queue-age bound, carried on the checker command line
+so a frozen witness evaluates identically). Every finding freezes its
+step list as a witness that `rechaos minimize --steps` shrinks; see
+[`scheduler-chaos.md`](scheduler-chaos.md).
+
+### 8. No action starves while later submissions are dispatched past it
+
+- **Statement.** An action must not wait longer than the queue-age bound while
+  the scheduler dispatches actions submitted after it. The bound is the longest
+  action in the scenario's base stream plus a dispatch margin: within that time
+  a fair scheduler can drain a slot (or hold one back) for the waiting action.
+- **Derives from.** REAPI `Execution` liveness and the scheduler's own
+  contract that a queued action eventually runs on a worker that satisfies its
+  platform properties. A `minimum` property such as `memory_kb` names a resource
+  the scheduler debits per running action; an action that fits only a nearly
+  empty worker must still get one.
+- **How checked.** `Rechaos.Core.Scenario.evaluate` (mirrored by the Python engine's `evaluate`) takes, per action, the
+  time from `Execute` submission to the first `EXECUTING` stage (or, if never
+  dispatched, to the last observation of the operation), minus any of that
+  time spent inside a control-fault window. It flags an action
+  whose wait exceeds the bound **and** that at least one later-submitted action
+  overtook (reached `EXECUTING` before it). The second condition separates a
+  scheduling decision from a merely overloaded fleet.
+- **Signature.** `queue-starvation`.
+- **Violation looks like.** An action asking for most of a worker's memory,
+  queued behind a continuous stream of small ones: every freed slot goes to the next small
+  action, the large one waits until the stream ends. Reproduced on
+  upstream v1.7.6; quiet on post-fix `main` once the opt-in
+  `reservation_hold` (NativeLink #2933) is enabled.
+
+### 9. No action stalls while the fleet has room for it
+
+- **Statement.** An action must not wait longer than the queue-age bound when,
+  at the moment the bound elapses, everything in flight fits the fleet's
+  declared capacity (slots and `memory_kb` per worker) with room to spare.
+- **Derives from.** The same liveness contract as invariant 8, in the case
+  where no overtake explains the wait: capacity exists, nothing is dispatched.
+  This is the shape a leaked worker slot or a scheduler that lost track of a
+  worker produces.
+- **How checked.** `evaluate` flags a wait past the bound with no overtaking
+  action when the actions in flight at the bound sum to at most the fleet's
+  slots, each fits one worker's `memory_kb`, and their memory sums to at most
+  the fleet's. Demand is computed from the scenario's own declarations, so it
+  is deterministic.
+- **Signature.** `dispatch-stall`.
+- **Violation looks like.** After a control-plane fault, the trailing probe
+  actions (one per slot) queue indefinitely although the workers are idle.
+
+### 10. No operation stays `EXECUTING` past the scheduler's own timeout
+
+- **Statement.** An operation observed in `EXECUTING` must leave that stage
+  (complete, fail, or be requeued) within `max_action_executing_timeout_s +
+  worker_timeout_s` plus a margin, whether or not a client is attached.
+- **Derives from.** `WaitExecution` liveness and the scheduler's configured
+  `max_action_executing_timeout_s`: an executing action with no worker update
+  is to be timed out and requeued. A record that outlives both the action and
+  the worker's slot is a lost result.
+- **How checked.** Scenario actions marked `detach` cancel their `Execute`
+  stream at the first `EXECUTING` and are re-attached with `WaitExecution`
+  once per second until done or the bound elapses (extended by any fault
+  window that overlapped). `evaluate` flags an operation whose last observed
+  stage is still `EXECUTING` once the bound has elapsed outside fault windows.
+- **Signature.** `stuck-executing`.
+- **Violation looks like.** A `store-full` step caps the scheduler's Redis at
+  its current `used_memory` (writes answer `OOM`) while actions finish; the
+  worker reports their results, the write is refused, the record stays
+  `EXECUTING` for the whole bound while new work still flows. Reproduced on
+  upstream v1.7.6 with the Redis backend; quiet on post-fix
+  `main` (NativeLink #2923, #2925).
+
+### 11. An action does not fail on its worker's own cache while its inputs are present
+
+- **Statement.** An action whose inputs are all present in the CAS must not
+  fail with a server-side status; in particular it must not fail because the
+  worker's local input cache evicted a file between lookup and staging.
+- **Derives from.** REAPI execution semantics: the CAS is the source of truth
+  for inputs; a worker-local cache is an implementation detail and its
+  eviction is never the client's fault.
+- **How checked.** For every action that completes with a non-`OK` status not
+  attributable to the client (`CANCELLED`, `DEADLINE_EXCEEDED`, `UNAVAILABLE`
+  are excluded), the engine runs `FindMissingBlobs` over the action's input
+  blobs, root directory, and command. With nothing missing, a message matching
+  `evict` or `hard link` is `input-evicted-failure`; any other status is
+  `action-failed-inputs-present:<CODE>` so that unexpected server-side failures
+  are still surfaced under a stable name, unless the failure was answered while
+  a control fault was active (a store refusing a new action with `OOM` is that
+  fault's own honest effect, not a scheduler bug).
+- **Signatures.** `input-evicted-failure`; `action-failed-inputs-present:<CODE>`.
+- **Violation looks like.** `FAILED_PRECONDITION: Could not make hardlink ...
+  file was likely evicted from cache` on a worker whose cache sits at 87% of
+  `max_bytes` under concurrent staging of shared inputs. Reproduced on
+  upstream v1.7.6; quiet on post-fix `main` (NativeLink #2926,
+  #2928).
+
+## Object-store dialect invariants (fleet rig with a cloud CAS)
+
+Invariants 12 and 13 need a rig whose CAS slow tier sits behind the dialect
+fault proxy (`fleet_rig.py --cas-backend azure|s3`), so that a sustained
+account-level throttle in the hyperscaler's exact shape (Azure `503
+ServerBusy` with `x-ms-error-code` and "Egress is over the account limit.",
+S3 `503 SlowDown`, GCS `503`/`429` JSON) reaches NativeLink's own object-store
+client. The scenario step is `store-throttle`; see
+[`scheduler-chaos.md`](scheduler-chaos.md) and [`s3-faults.md`](s3-faults.md).
+
+### 12. A throttle shorter than the download budget does not fail an action
+
+- **Statement.** While the object store answers reads with its throttle error
+  (which carries `Retry-After`), an action whose inputs are all present must
+  not fail on the input fetch, as long as the throttle is shorter than the
+  worker's download budget (`max_download_timeout_s`). The store said "retry
+  later"; giving up inside that budget is the client's choice, not the store's.
+- **Derives from.** The object store's documented throttling contract: a 503
+  with `Retry-After` is a transient condition the client is expected to back
+  off from and retry, not a failure of the object. REAPI execution semantics
+  make the CAS the source of truth for inputs that are present.
+- **How checked.** `evaluate` flags an action that completed with a non-`OK`,
+  non-client status, whose inputs `FindMissingBlobs` reports present, whose
+  message names the store fetch (`download`, `fetch`, `ServerBusy`,
+  `SlowDown`, `rateLimit`, `throttl`, `On attempt`, ...), and whose failure
+  time falls inside a `store-throttle` window (plus five seconds) shorter than
+  the download budget. A throttle longer than the budget makes giving up
+  legitimate and produces no finding.
+- **Signature.** `store-throttle-giveup`.
+- **Violation looks like.** `INTERNAL: ... Failed to start download from
+  Azure ... On attempt 7` about 36 s into a 60 s throttle, exactly a
+  6-retry/0.3 s/0.5-jitter client budget. Reproduced on upstream v1.7.6 with
+  the Azure dialect; quiet on post-fix `main`, where every action completed
+  two seconds after the throttle lifted after 480 throttled reads that honored
+  `Retry-After` (NativeLink #2931, #2932).
+
+### 13. A throttle does not re-dispatch an action to another worker
+
+- **Statement.** An action must not fall from `EXECUTING` back to `QUEUED`
+  because of an object-store throttle shorter than the download budget: the
+  worker that holds it retries in place. Re-dispatch makes another worker
+  download the same inputs from the same throttled account, which is how one
+  account's egress limit turns into a fleet-wide storm.
+- **Derives from.** The same throttling contract as invariant 12, applied to
+  the scheduler's response to a worker's fetch failure, and the arithmetic
+  of a throttled account: every re-dispatch is another full download of the
+  input tree.
+- **How checked.** The engine records every `EXECUTING` to `QUEUED`
+  transition on an action's `Execute` stream. `evaluate` flags an action with
+  at least one such requeue inside a `store-throttle` window (plus five
+  seconds) shorter than the download budget. A scenario whose scheduler
+  `max_action_executing_timeout_s` is shorter than the throttle is refused as
+  inconclusive, because that timeout requeues fetching actions on its own
+  clock.
+- **Signature.** `store-throttle-redispatch`.
+- **Violation looks like.** Requeues at 20 s and 40 s into the throttle and a
+  final `FAILED_PRECONDITION: Job cancelled because it attempted to execute
+  too many times 4 > 3`. Reproduced on upstream v1.7.6 with both the Azure
+  and S3 dialects; quiet on post-fix `main`. On the S3 path the client sees
+  the action end with `INTERNAL: channel closed : Failed to wait for awaited
+  action to change` rather than the fetch error, so invariant 12 cannot
+  attribute the give-up there; the re-dispatch and the stream failure
+  (`action-failed-inputs-present:INTERNAL`) still surface it.
+
 ## Meta: iteration integrity
 
 The harness also treats an iteration that crashes before completing its checks as

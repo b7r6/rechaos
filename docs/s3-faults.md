@@ -1,4 +1,4 @@
-# S3/R2 egress faults: the slow-store fault proxy
+# Object-store egress faults: the slow-store fault proxy (S3, Azure Blob, GCS)
 
 `scripts/s3_fault_proxy.py` is a stdlib-only HTTP(S) forwarding proxy that sits on
 the **NativeLink &rarr; object-store** hop and injects faults on the S3 REST API
@@ -26,6 +26,41 @@ Concretely, it stresses:
 - **`fast` &rarr; `slow` reconciliation.** `truncate` and `reset` return partial
   or abruptly-cut bodies, so a read-through or verify step on the slow tier sees a
   short object or a mid-body connection reset.
+
+## Dialects: S3, Azure Blob, GCS
+
+Each hyperscaler throttles in its own shape, and each store client keys its
+backoff on exactly that shape, so the proxy speaks three dialects
+(`--dialect s3|azure|gcs`, default `s3`). The dialect sets request
+classification (Azure's `/account/container/blob` paths and `?comp=`
+queries, GCS's `/storage/v1/b/{bucket}/o/{object}?alt=media` and
+`/upload/storage/v1/...` routes), the default key strip (2 for Azurite's
+path style), and the byte-faithful throttle response:
+
+| Dialect | Status | Headers | Body |
+|---|---|---|---|
+| `s3` | 503 | `x-amz-request-id`, `Retry-After` | `<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message><Resource>...</Resource></Error>` |
+| `azure` | 503 | `x-ms-error-code: ServerBusy`, `x-ms-request-id`, `x-ms-version`, `Retry-After` | `<Error><Code>ServerBusy</Code><Message>Egress is over the account limit.\nRequestId:...\nTime:...</Message></Error>` |
+| `gcs` | 503 (or 429) | `Retry-After` | `{"error":{"code":503,"message":"Backend Error","errors":[{"message":"Backend Error","domain":"global","reason":"backendError"}]}}` (`rateLimitExceeded` under `usageLimits` for 429) |
+
+`--slowdown-status`, `--slowdown-code`, and `--slowdown-message` override the
+dialect defaults, so Azure's other account limits ("Ingress is over the
+account limit.", "Operations per second is over the account limit.") and
+GCS's `rateLimitExceeded` are one flag away. `--retry-after` sets the hint
+(0 omits the header).
+
+## The control endpoint
+
+`--control host:port` starts a second listener the scenario engine drives:
+
+- `POST /throttle` with `{"on":true,"ops":"GET","status":503,"code":"ServerBusy","message":"...","retry_after":1,"prefix":""}` turns a **sustained** throttle on for the named operations (every matching request, not a sampled share, until `{"on":false}`), in the dialect's shape;
+- `GET /stats` returns request counts by operation and per key (`requests`, `throttled`, `served`; the 200 busiest keys), so a scenario can see how many times one digest was fetched across the fleet;
+- `POST /reset` clears the counters.
+
+The `store-throttle` scenario step in
+[`scheduler-chaos.md`](scheduler-chaos.md) is this endpoint switched on for
+`for_ms` and off again; the rig (`fleet_rig.py --cas-backend azure|s3`) starts
+the proxy with a control port and records its URL in `rig.json`.
 
 ## The proxy at a glance
 
