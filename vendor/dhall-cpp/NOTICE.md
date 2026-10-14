@@ -12,7 +12,7 @@ inputs. See `docs/dhall-cost.md` for the method and the numbers.
 | Patches here | `lexer.cpp`: double literals re-read with `std::from_chars` (correct rounding); unsigned literals past 2^64-1 become BigInt tokens instead of a truncated Natural; absolute local imports (`/path`) lexed as paths. `parser.cpp`: `Type`, `Kind`, `Sort` accepted as field labels after `.`. Each patch is marked `rechaos:` in the source. `dhall.hpp`, `lexer.hpp`, `parser.hpp`, `import.hpp` are unmodified. |
 | Files left behind | `cbor.hpp`, `async_import.hpp`, `http_fetch.hpp`, `http2_fetcher.hpp`, the tests and benchmarks: HTTP imports, CBOR, and the io_uring fetcher are not needed to evaluate local files |
 | Added here | `tools/dhall-cpp.cpp`, a command-line driver with a JSON emitter that follows `dhall-to-json`'s conventions |
-| License | The source repository carries no license file at the pinned commit. It is owned by the same organization as rechaos's author; a license must be attached before this directory ships in a release. |
+| License | MIT, as its upstream (`LICENSE` in this directory). |
 
 What the evaluator is and is not: it parses, resolves local imports, and
 normalizes. It has **no type checker**; an ill-typed program is evaluated as

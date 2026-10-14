@@ -24,9 +24,8 @@ All notable changes to this project are documented here. The format follows
   C++ evaluator measured under that protocol (`nix build .#dhall-cpp`, gated by
   `checks.dhall-cpp` for agreement on scenario inputs); 33 to 35x faster on
   literal witnesses, equal as parsed JSON on scenarios, no type checker,
-  non-standard union normal form, arena memory never freed, and an upstream
-  without a license file (not redistributable until one is attached). Not the
-  gate's implementation.
+  non-standard union normal form, arena memory never freed. MIT, like its
+  upstream. Not the gate's implementation.
 - `dhall/`: typed scenario steps, fleet parameters, NativeLink configs, and
   limits that render to the wire JSON with `dhall-to-json`; the `dhall` flake
   check type-checks them offline, validates the example scenarios, and requires
