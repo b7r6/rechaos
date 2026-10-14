@@ -836,13 +836,16 @@ def healthy(manifest):
     redis = manifest.get("redis") or {}
     if redis.get("pid") and process_state(redis["pid"]) in (None, "T", "t", "Z", "X"):
         return False
-    return health_ok(manifest["port"])
+    return health_ok(manifest["port"], manifest.get("host", "127.0.0.1"), manifest.get("health_url"))
 
 
-def health_ok(port):
-    """The scheduler's HTTP health route answers (any 2xx)."""
+def health_ok(port, host="127.0.0.1", url=None):
+    """The scheduler's HTTP health route answers (any 2xx). A manifest for a
+    REMOTE fleet (no pids: the rig did not start it) names the route itself
+    (`health_url`), since the health service may sit on another listener than
+    the REAPI port."""
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=2).read()
+        urllib.request.urlopen(url or f"http://{host}:{port}/status", timeout=2).read()
         return True
     except Exception:
         return False

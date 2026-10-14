@@ -67,6 +67,7 @@ import argparse
 import http.server
 import io
 import json
+import os
 import random
 import socket
 import socketserver
@@ -161,13 +162,38 @@ class FaultConfig:
     """Immutable-ish bundle of fault parameters, built from argparse."""
 
     def __init__(self, args):
-        self.upstream = args.upstream.rstrip("/")
+        # The upstream is either --upstream (argv; no credential in it) or, for a
+        # SAS-authenticated Azure container, the URL in the environment variable
+        # --upstream-sas-env names: its scheme + host become the upstream, its
+        # query (the SAS token) is appended to every forwarded request, and its
+        # path (the container) is expected on the client's own request path, so
+        # NativeLink's store is pointed at `http://<proxy>/<container>` with no
+        # credential at all. The token never appears in argv, logs or /stats.
+        self.upstream_query = ""
+        if getattr(args, "upstream_sas_env", ""):
+            if args.upstream:
+                raise ValueError("--upstream and --upstream-sas-env are mutually exclusive")
+            raw = os.environ.get(args.upstream_sas_env, "")
+            if not raw:
+                raise ValueError(f"--upstream-sas-env: ${args.upstream_sas_env} is empty or unset")
+            parsed = urllib.parse.urlparse(raw.strip())
+            if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.query:
+                raise ValueError(f"--upstream-sas-env: ${args.upstream_sas_env} is not an http(s) URL with a query")
+            self.upstream = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+            self.upstream_query = parsed.query
+        else:
+            if not args.upstream:
+                raise ValueError("one of --upstream or --upstream-sas-env is required")
+            self.upstream = args.upstream.rstrip("/")
         parsed = urllib.parse.urlparse(self.upstream)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError(f"--upstream must be an http(s) URL, got {args.upstream!r}")
         self.upstream_scheme = parsed.scheme
         self.upstream_netloc = parsed.netloc
         self.upstream_path = parsed.path.rstrip("/")  # base path prefix, usually ""
+        self.host_header = getattr(args, "host_header", "client")
+        if self.host_header not in ("client", "upstream"):
+            raise ValueError("--host-header must be client or upstream")
         self.dialect = args.dialect
         if self.dialect not in DIALECTS:
             raise ValueError(f"--dialect must be one of {sorted(DIALECTS)}, got {args.dialect!r}")
@@ -474,10 +500,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _forward(self, method, parsed, body):
         cfg = self.cfg
-        # Reconstruct the upstream URL: base + original path + original query.
+        # Reconstruct the upstream URL: base + original path + original query
+        # (+ the SAS token from --upstream-sas-env, which the client never saw).
         path = cfg.upstream_path + parsed.path
+        query = parsed.query
+        if cfg.upstream_query:
+            query = f"{query}&{cfg.upstream_query}" if query else cfg.upstream_query
         url = urllib.parse.urlunsplit((cfg.upstream_scheme, cfg.upstream_netloc,
-                                       path, parsed.query, ""))
+                                       path, query, ""))
         req = urllib.request.Request(url=url, method=method,
                                      data=body if body else None)
         # Copy client headers through, minus hop-by-hop and Content-Length.
@@ -488,13 +518,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # through keeps the signature consistent. (For a real R2/S3 upstream whose
         # presigned URL is keyed to the real host, set the SDK endpoint equal to
         # that host and this preserves the same value -- still a no-op.)
+        # A real hyperscaler endpoint is the opposite case: Azure resolves the
+        # storage ACCOUNT from the Host header, so a request that carries the
+        # proxy's own name is refused before the SAS is even looked at;
+        # --host-header upstream sends the upstream's host instead.
         orig_host = self.headers.get("Host")
         for name, value in self.headers.items():
             low = name.lower()
             if low in HOP_BY_HOP or low in ("host", "content-length"):
                 continue
             req.add_header(name, value)
-        if orig_host:
+        if cfg.host_header == "upstream":
+            req.add_header("Host", cfg.upstream_netloc)
+        elif orig_host:
             req.add_header("Host", orig_host)
         ctx = None
         if cfg.upstream_scheme == "https":
@@ -761,9 +797,20 @@ def build_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--listen", default="127.0.0.1:8081",
                    help="host:port to listen on")
-    p.add_argument("--upstream", required=True,
+    p.add_argument("--upstream", default="",
                    help="base URL of the real object store, e.g. "
-                        "https://<ACCOUNT>.r2.cloudflarestorage.com or http://127.0.0.1:9000")
+                        "https://<ACCOUNT>.r2.cloudflarestorage.com or http://127.0.0.1:9000 "
+                        "(or --upstream-sas-env)")
+    p.add_argument("--upstream-sas-env", default="",
+                   help="name of an environment variable holding an Azure container SAS URL "
+                        "(https://<account>.blob.core.windows.net/<container>?<sas>): its scheme+host "
+                        "become the upstream, its query is appended to every forwarded request, the "
+                        "container is expected on the client's request path. The token never enters "
+                        "argv or a log line")
+    p.add_argument("--host-header", default="client", choices=["client", "upstream"],
+                   help="Host header sent upstream: the client's (keeps a SigV4 signature valid at a "
+                        "loopback MinIO) or the upstream's (a real Azure/S3 endpoint resolves the "
+                        "account from it)")
     p.add_argument("--dialect", default="s3", choices=sorted(DIALECTS),
                    help="object-store dialect: request classification and the exact throttle "
                         "status/headers/body the store's SDK keys its backoff on")

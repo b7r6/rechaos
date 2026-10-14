@@ -789,7 +789,10 @@ exec nix develop --command "${{RECHAOS_BIN:-./result/bin/rechaos}}" minimize \\
         # -- input cache pressure --------------------------------------------- #
         pressure = choose("sched_cache_pressure", ["none", "mild", "heavy"])
         # -- a control-plane fault, when the rig can serve one ------------------ #
-        faults = ["none"] + (["store-full", "store-pause"] if rig.get("redis") else []) + ["worker-pause"]
+        # A worker pause needs a worker PROCESS the rig started; a manifest for a
+        # remote fleet (no pids) can only offer the faults its control planes reach.
+        faults = (["none"] + (["store-full", "store-pause"] if rig.get("redis") else [])
+                  + (["worker-pause"] if (rig.get("pids") or {}).get("worker-0") else []))
         if rig.get("object_store"):
             faults.append("store-throttle")
         fault = choose("sched_fault", faults)

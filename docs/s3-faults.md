@@ -79,8 +79,18 @@ bazel/client --grpc--> NativeLink --s3 http--> s3_fault_proxy --http(s)--> objec
 - Stdlib only: `http.server` + `ThreadingHTTPServer` + `urllib` + `ssl`. No
   external dependencies, runs under `nix develop` or bare `python3`.
 
-`--upstream` is **required** and has no default &mdash; there is no hardcoded
-endpoint anywhere. Point it only at an object store you control.
+`--upstream` has no default &mdash; there is no hardcoded endpoint anywhere. Point
+it only at an object store you control. For a SAS-authenticated Azure container the
+upstream comes from the environment instead: `--upstream-sas-env AZURE_CAS_SAS_URL`
+reads `https://<account>.blob.core.windows.net/<container>?<sas>` from that
+variable, uses its scheme and host as the upstream, appends its query (the token)
+to every forwarded request, and expects the container on the client's own request
+path &mdash; so NativeLink's store is pointed at `http://<proxy>/<container>` with no
+credential at all, and the token is never in argv, a log line, or `/stats`. A real
+Azure or S3 endpoint resolves the storage account from the `Host` header, so pair it
+with `--host-header upstream` (the default, `client`, keeps a SigV4 signature valid
+at a loopback MinIO). With the container on the path, `--strip 1` makes the key the
+blob name (`cas/<digest>`) for prefix matching.
 
 ## The fault menu
 
